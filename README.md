@@ -36,3 +36,12 @@ La sección `[email]` puede omitirse durante las primeras pruebas; las reservas 
 
 ## Corrección principal de v1.0.1
 Todas las lecturas parametrizadas con `conn.query()` utilizan marcadores nombrados compatibles con pandas y SQLAlchemy 2.x. Las escrituras utilizan `execute_sql()`.
+
+
+## Minuta oficial de agosto 2026
+El archivo `minuta_agosto_2026.csv` contiene 168 alternativas extraídas de la minuta ALEMSI: almuerzo y cena, cada uno con Opción 1, Opción 2 e Hipocalórico, para el 1 al 28 de agosto de 2026. La carga es automática e idempotente al iniciar la aplicación.
+
+## Correos demo
+- Reservas: comprobante al correo registrado del comensal y copia/notificación a Cocina.
+- Reclamos, sugerencias y felicitaciones: `ale973@gmail.com` y `araucaniashop@gmail.com`.
+- El envío requiere la sección `[email]` en Streamlit Secrets con una clave de aplicación de Gmail.
