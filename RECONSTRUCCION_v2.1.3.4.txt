@@ -1,0 +1,73 @@
+MAMUIL MALAL ERP — RECONSTRUCCIÓN v2.1.3.4 CANDIDATO INTEGRADO
+Fecha: 2026-08-07
+
+BASE
+- Parte de v2.1.3.3 candidato comensal+cocina.
+- app.py y streamlit_app.py deben ser idénticos.
+- PostgreSQL/Supabase sigue siendo fuente oficial.
+
+REGLAS NO ROMPIBLES
+1. No reescribir el circuito Comensal -> Reserva -> PostgreSQL -> comprobante/correo.
+2. Tarifa comercial estándar: $6.400 por día, no por plato ni por servicio.
+3. Mantener validación de RUT y reglas de acceso.
+4. No borrar columnas/tablas existentes para agregar funciones.
+5. Toda migración es idempotente (ADD COLUMN IF NOT EXISTS / CREATE TABLE IF NOT EXISTS).
+6. Un fallo de un correo secundario no debe borrar ni revertir datos guardados.
+7. Cierre de Cocina nunca modifica la reserva original.
+8. Descuento definitivo de Bodega por producción permanece desactivado hasta aprobar recetas y validar cálculos.
+
+COCINA CERRADA
+- Ver minuta por fecha y minuta mensual.
+- Jornada completa por día; no inicio por servicio aislado.
+- Visualizar jornada no modifica datos.
+- Iniciar jornada congela cantidades reservadas de todos los servicios.
+- Bloques separados por Desayuno/Almuerzo/Once/Cena y opción de minuta.
+- Cierre registra Reservadas / Producidas / Entregadas.
+- Si existe diferencia, motivo obligatorio.
+- Novedades generales persistentes.
+- Reporte diario enviado a Administración Casino; si SMTP falla, cierre queda guardado.
+- Recetas tipo en BORRADOR: Cazuela de ave, Lentejas guisadas, Carbonada de vacuno, Pastel de papa, Pollo arvejado con arroz zanahoria.
+
+FINANZAS CERRADA — PRIMERA IMPLEMENTACIÓN
+- Usuario Finanzas separado.
+- Vista por referencia de reserva, comensal, RUT, correo, institución, fechas, días, método, estado y monto.
+- Métodos permitidos: Transferencia bancaria / Débito en la instalación.
+- Estados: Pendiente / Comprobante recibido / Observado / Pagado.
+- Finanzas puede ajustar monto; motivo obligatorio para cambio de monto o estado Observado.
+- Ajustes se guardan en ajustes_financieros y auditoria_acciones.
+- Reporte semanal descargable.
+- Automatización 17:00 y link seguro de comprobante quedan como capa siguiente; no dependen de Streamlit abierto.
+
+USUARIOS Y PERMISOS
+- Cocina: cocina / cocina123 (pruebas)
+- Finanzas: finanzas / finanzas123 (pruebas)
+- Gerencia: gerencia / gerencia123 (pruebas)
+- Administrador Casino: admin_casino / casino123 (pruebas)
+- Administrador Total: admin / admin123 (compatibilidad con admin histórico)
+- Administrador Total puede crear/actualizar usuarios, activar/desactivar cuentas, cambiar roles y permisos específicos.
+- Roles administrativos permanecen en portal Administración después de rerun.
+- Roles Cocina/Bodega/Finanzas permanecen en portal Casino después de rerun.
+
+TABLAS NUEVAS / AMPLIADAS
+- jornadas_produccion
+- jornada_detalle
+- usuarios_permisos
+- auditoria_acciones
+- ajustes_financieros
+- usuarios: activo, fecha_creacion
+- recetas: estado, version, merma_pct, margen_produccion_pct
+- solicitudes: comprobante_url, pago_token, motivo_estado_pago
+
+PRUEBAS MÍNIMAS ANTES DE APROBAR
+A. Comensal comercial
+- RUT válido -> seleccionar fechas -> mínimo un servicio/día -> $6.400/día -> confirmar -> PostgreSQL -> correo.
+B. Cocina
+- Login cocina -> permanece en Cocina -> elegir fecha -> visualizar jornada -> iniciar -> cerrar con cantidades -> exigir motivo si hay diferencia -> verificar historial y correo admin casino.
+C. Finanzas
+- Login finanzas -> permanece en Finanzas -> ver reservas -> cambiar estado -> ajustar monto con motivo -> reporte semanal.
+D. Administración
+- admin -> permanece en Administración -> crear usuario -> deshabilitar -> comprobar que login bloquea usuario inactivo -> cambiar permisos.
+E. Regresión
+- Repetir reserva completa y correo; si falla, volver a v2.1.3.3.
+
+NO APROBAR COMO FINAL hasta completar pruebas reales en Streamlit/Supabase.
