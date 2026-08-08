@@ -1,0 +1,21 @@
+name: Mantener App de Streamlit Despierta
+
+on:
+  schedule:
+    - cron: '0 0,12 * * *'
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Clonar el repositorio
+      uses: actions/checkout@v4
+
+    - name: Realizar commit fantasma
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action Bot"
+        git commit --allow-empty -m "Keep-alive: Reiniciando temporizador de Streamlit"
+        git push
+        
