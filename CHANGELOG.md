@@ -1,0 +1,36 @@
+# v2.1.3.12 — Login Recovery Fix
+
+- Recuperación: primero envía el correo y solo después actualiza la contraseña temporal.
+- Si SMTP falla, la contraseña existente permanece intacta.
+- Mensaje de prueba confirma envío real a correo parcialmente oculto.
+- No modifica reservas, Cocina, Minutas ni Finanzas.
+
+# ALEMSI v2.1.3.11 — Login Recovery
+
+- Login único de personal conservado.
+- Recuperación de contraseña por correo asociado al usuario.
+- Contraseña temporal con cambio obligatorio al siguiente ingreso.
+- Correo agregado a usuarios creados desde Admin Total.
+- Bootstrap Admin Total requiere correo de recuperación.
+- No se agregan usuarios ni contraseñas predeterminadas al código.
+- No se modifica el circuito de reservas/comensal en esta candidata.
+
+## v2.1.3.19_FINANZAS_COLORES_COMPROBANTES
+- Portal de comprobante actualizado en la misma ventana hacia encuesta Casino (prioritaria) y APP (secundaria).
+- Persistencia separada de evaluaciones en PostgreSQL.
+- Hotfix import Path para carga a Drive.
+- GRAF-02: colores consistentes centralizados, nombres horizontales y máximo 7 instituciones por fila.
+- Visualización real de comprobantes preservada desde Drive/PostgreSQL.
+
+## v2.1.3.20_USUARIOS_NOTIFICACION_CORREO
+- AUTH-03: creación de usuarios desde Administración con contraseña temporal segura generada por la APP.
+- AUTH-03: envío automático al correo registrado con usuario, contraseña temporal, perfil y enlace de ingreso.
+- AUTH-03: primer ingreso mantiene cambio obligatorio de contraseña.
+- AUTH-04: restablecer/reenviar acceso genera una nueva contraseña temporal y la notifica desde la APP.
+- AUTH-04: si falla el correo de restablecimiento, la contraseña vigente no se modifica.
+- Se mantienen intactos reservas, comprobantes, Finanzas, encuestas, Cocina, Bodega y Gerencia.
+
+## v2.1.3.21_HOTFIX_NOTIFICACION_INGRESO
+- Administración Total: nuevo botón **Notificar ingreso** para reenviar usuario y enlace al portal sin modificar la contraseña existente.
+- Auditoría de notificación mediante evento `NOTIFICAR_INGRESO`.
+- Corrección de identidad interna de versión a `v2.1.3.21`.
