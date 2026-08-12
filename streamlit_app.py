@@ -950,7 +950,7 @@ def render_comensal():
     if st.session_state.rut_actual:
         rut=st.session_state.rut_actual
         conn=get_conn()
-        com=conn.query("SELECT * FROM comensales WHERE rut=:rut", params={"rut": rut}, ttl=0)
+        com=conn.query("SELECT * FROM comensales WHERE rut=:rut", params={"rut": rut}, ttl=60)
         if com.empty: st.session_state.rut_actual=None; st.rerun()
         nombre=com.iloc[0]['nombre']
         institucion=com.iloc[0]['institucion'] if 'institucion' in com.columns and com.iloc[0]['institucion'] else "Visitas"
@@ -1126,9 +1126,16 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                 for dia_iso in dias:
                     st.session_state.pedidos.setdefault(dia_iso, {})
 
-                df_minutas = get_minutas_rango(dias[0], dias[-1])
-                if not df_minutas.empty:
-                    df_minutas = df_minutas[df_minutas["fecha"].astype(str).isin(dias)].copy()
+                # OPTIMIZACION v2.1.3.30: reutilizar df_minutas cacheado y guardar en session para evitar reconsulta
+                cache_key = f"{dias[0]}_{dias[-1]}"
+                if st.session_state.get("_minutas_cache_key") != cache_key or "_minutas_cache" not in st.session_state:
+                    df_minutas = get_minutas_rango(dias[0], dias[-1])
+                    if not df_minutas.empty:
+                        df_minutas = df_minutas[df_minutas["fecha"].astype(str).isin(dias)].copy()
+                    st.session_state["_minutas_cache"] = df_minutas
+                    st.session_state["_minutas_cache_key"] = cache_key
+                else:
+                    df_minutas = st.session_state.get("_minutas_cache", pd.DataFrame())
 
                 if not st.session_state.get("reserva_revisar", False):
                     titulo_paso = "🍽️ Paso 2: Declara tu consumo" if es_alemsi else "🍽️ Paso 2: Elige la minuta"
@@ -1240,6 +1247,8 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                         st.session_state.pedidos = {}
                         st.session_state.wizard_idx = 0
                         st.session_state.reserva_revisar = False
+                        st.session_state.pop("_minutas_cache", None)
+                        st.session_state.pop("_minutas_cache_key", None)
                         st.rerun()
                     if anterior:
                         if elecciones_dia:
@@ -1473,6 +1482,8 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                         st.session_state.dias_sel = []
                         st.session_state.pedidos = {}
                         st.session_state.reserva_revisar = False
+                        st.session_state.pop("_minutas_cache", None)
+                        st.session_state.pop("_minutas_cache_key", None)
                         st.session_state.resultado_reserva = {"ok": ok_resultado, "mensaje": mensaje_resultado, "vouchers": vouchers, "referencia": referencia_reserva}
                         st.rerun()
 
