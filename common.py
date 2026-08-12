@@ -831,3 +831,12 @@ def init_db():
         except Exception as e2:
             st.error(f"Error init_db PostgreSQL: {e} / {e2}")
             raise
+
+# v2.1.3.30 - Helper para Personal ALEMSI
+def es_personal_alemsi(institucion: str) -> bool:
+    """Identifica personal ALEMSI por institucion, tolerante a mayusculas/espacios."""
+    return str(institucion or "").strip().casefold() == "alemsi"
+
+def debe_mostrar_solo_opcion1(institucion: str) -> bool:
+    """Personal ALEMSI Oficina y Paso Fronterizo siempre Opcion 1."""
+    return es_personal_alemsi(institucion)
