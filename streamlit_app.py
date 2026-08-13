@@ -1,3 +1,4 @@
+# ALEMSI v2.1.3.31_PRUEBA_OPTIMIZACION_UI - cambios incrementales sobre v2.1.3.30
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime
@@ -982,7 +983,7 @@ def render_comensal():
 
         with tab_reserva:
             es_alemsi = str(institucion or "").strip().casefold() == "alemsi"
-            resultado_anterior = st.session_state.pop("resultado_reserva", None)
+            resultado_anterior = st.session_state.get("resultado_reserva")
             if resultado_anterior:
                 if resultado_anterior.get("ok"):
                     st.success(resultado_anterior["mensaje"])
@@ -990,6 +991,28 @@ def render_comensal():
                     st.warning(resultado_anterior["mensaje"])
                 if resultado_anterior.get("referencia"):
                     st.info(f"Referencia de consulta: {resultado_anterior['referencia']}")
+                st.markdown("#### ¿Qué deseas hacer ahora?")
+                c_otro, c_fin = st.columns(2)
+                with c_otro:
+                    if st.button("➕ Hacer otra reserva", use_container_width=True, key="otra_reserva_post_confirmacion"):
+                        st.session_state.pop("resultado_reserva", None)
+                        st.session_state.dias_sel = []
+                        st.session_state.pedidos = {}
+                        st.session_state.wizard_idx = 0
+                        st.session_state.fechas_calendario = []
+                        st.rerun()
+                with c_fin:
+                    if st.button("🔒 Finalizar / Cerrar sesión", type="primary", use_container_width=True, key="cerrar_post_confirmacion"):
+                        st.session_state.usuario = None
+                        st.session_state.rut_actual = None
+                        st.session_state.dias_sel = []
+                        st.session_state.pedidos = {}
+                        st.session_state.wizard_idx = 0
+                        st.session_state.portal_actual = "inicio"
+                        st.session_state.fechas_calendario = []
+                        st.session_state.pop("resultado_reserva", None)
+                        st.rerun()
+                st.stop()
 
             if es_alemsi:
                 st.info(
@@ -1023,32 +1046,27 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                 @media (max-width: 768px) {
                   /* CAL-MOVIL-01: Streamlit apila st.columns por defecto.
                      En el selector de reservas forzamos cada fila calendario a 7 columnas. */
-                  div[data-testid="stVerticalBlock"] > div:has(.alemsi-cal-row)
-                    + div[data-testid="stHorizontalBlock"] {
+                  div[data-testid="stHorizontalBlock"]:has(.alemsi-cal-cell) {
                       display:grid !important;
                       grid-template-columns:repeat(7,minmax(0,1fr)) !important;
                       gap:3px !important;
                       width:100% !important;
                   }
-                  div[data-testid="stVerticalBlock"] > div:has(.alemsi-cal-row)
-                    + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                  div[data-testid="stHorizontalBlock"]:has(.alemsi-cal-cell) > div[data-testid="column"] {
                       width:auto !important;
                       min-width:0 !important;
                       flex:none !important;
                       padding:0 !important;
                   }
-                  div[data-testid="stVerticalBlock"] > div:has(.alemsi-cal-row)
-                    + div[data-testid="stHorizontalBlock"] button {
+                  div[data-testid="stHorizontalBlock"]:has(.alemsi-cal-cell) button {
                       width:100% !important;
                       min-width:0 !important;
                       min-height:38px !important;
                       padding:2px 0 !important;
                       border-radius:8px !important;
                   }
-                  div[data-testid="stVerticalBlock"] > div:has(.alemsi-cal-row)
-                    + div[data-testid="stHorizontalBlock"] p,
-                  div[data-testid="stVerticalBlock"] > div:has(.alemsi-cal-row)
-                    + div[data-testid="stHorizontalBlock"] button p {
+                  div[data-testid="stHorizontalBlock"]:has(.alemsi-cal-cell) p,
+                  div[data-testid="stHorizontalBlock"]:has(.alemsi-cal-cell) button p {
                       font-size:11px !important;
                       line-height:1.05 !important;
                       text-align:center !important;
@@ -1080,6 +1098,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                 encabezados = st.columns(7)
                 for col, titulo in zip(encabezados, ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]):
                     with col:
+                        st.markdown('<span class="alemsi-cal-cell"></span>', unsafe_allow_html=True)
                         st.markdown(f"<div style='text-align:center;font-weight:700'>{titulo}</div>", unsafe_allow_html=True)
 
                 semanas = calendar.Calendar(firstweekday=0).monthdatescalendar(hoy.year, hoy.month)
@@ -1088,6 +1107,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                     columnas = st.columns(7)
                     for columna, dia in zip(columnas, semana):
                         with columna:
+                            st.markdown('<span class="alemsi-cal-cell"></span>', unsafe_allow_html=True)
                             pertenece_mes = dia.month == hoy.month
                             disponible = pertenece_mes and dia >= hoy and (
                                 not fechas_con_minuta or dia.isoformat() in fechas_con_minuta
@@ -2541,7 +2561,7 @@ def render_admin():
     if st.session_state.usuario and st.session_state.usuario["rol"] in ["AdminTotal","AdminCasino","Operaciones","Gerencia"]:
         st.markdown(f'<div class="al-card"><h3>🏢 Administración y Control de Gestión</h3><p>Información consolidada para la gestión operativa y financiera.</p></div>', unsafe_allow_html=True)
         rol_admin = str(st.session_state.usuario.get("rol", ""))
-        modulos_admin = ["📊 Reportes","📋 Planilla de Reservas","📈 Dashboard","📦 Inventario y Bodega","🍽️ Minutas","⚖️ Excepciones","🏢 Instituciones","💳 Modalidades de Pago","📧 Correos"]
+        modulos_admin = ["📈 Dashboard","📊 Reportes","📋 Planilla de Reservas","📦 Inventario y Bodega","🍽️ Minutas","⚖️ Excepciones","🏢 Instituciones","💳 Modalidades de Pago","📧 Correos"]
         if rol_admin == "AdminTotal":
             modulos_admin += ["🏦 Datos transferencia","👥 Usuarios","🧹 Depuración","🛡️ Respaldo"]
         modulo_admin = st.radio("Módulo", modulos_admin, horizontal=True, key="modulo_admin_activo", label_visibility="collapsed")
@@ -2670,7 +2690,14 @@ def render_admin():
             _dashboard_financiero(df_dash,"Resumen financiero y operacional")
             df_turnos=conn.query("SELECT fecha,servicio,COUNT(*) AS comensales FROM solicitudes WHERE (COALESCE(tipo_registro,'RESERVA_COMERCIAL') <> 'CONSUMO_INTERNO' OR estado_consumo='Consumirá') GROUP BY fecha,servicio ORDER BY fecha, CASE servicio WHEN 'Desayuno' THEN 1 WHEN 'Almuerzo' THEN 2 WHEN 'Once' THEN 3 WHEN 'Cena' THEN 4 ELSE 5 END",ttl=10)
             if not df_turnos.empty:
-                st.markdown("#### Comensales por servicio"); st.bar_chart(df_turnos.groupby('servicio')['comensales'].sum()); st.dataframe(_tabla_visible(df_turnos,{"fecha":"Fecha","servicio":"Servicio","comensales":"Comensales"},["fecha"]),use_container_width=True,hide_index=True)
+                st.markdown("#### Comensales por servicio")
+                st.bar_chart(df_turnos.groupby('servicio')['comensales'].sum())
+                with st.expander("Ver detalle de reservas por fecha y servicio", expanded=False):
+                    st.dataframe(
+                        _tabla_visible(df_turnos,{"fecha":"Fecha","servicio":"Servicio","comensales":"Comensales"},["fecha"]),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
             st.divider()
             st.markdown("#### Vista agrupada por institución y reserva")
