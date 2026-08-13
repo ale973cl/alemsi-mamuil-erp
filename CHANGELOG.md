@@ -1,3 +1,23 @@
+# ALEMSI v2.1.3.33 — Estabilización para pruebas reales
+
+## Correcciones incorporadas
+- Finanzas: refresco controlado después de validar/observar/rechazar y avance al siguiente comprobante disponible.
+- Finanzas: OBSERVADO y RECHAZADO notifican por correo al comensal con la misma referencia y el botón **Subir nuevo comprobante**.
+- Comensal: se elimina el botón global **Cerrar sesión**; el cierre del flujo se denomina únicamente **Finalizar**.
+- Gerencia / Reportes: se restaura una vista de **Minuta vigente** separada del reporte de platos solicitados.
+- Minutas: se elimina la caché de 20 s en la vista mensual para que una carga manual se refleje inmediatamente.
+- Minutas: copia entre meses optimizada evitando consultas SELECT por cada fila; se añade mensaje de proceso y resumen final.
+- AdminTotal: nuevo módulo **Actividad** con registro de login, cierre, intentos fallidos, IP/contexto técnico y auditoría de acciones.
+- Respaldo lógico: incorpora el registro de login.
+
+## Reglas preservadas
+- Reserva no descuenta Bodega.
+- El descuento de insumos ocurre al iniciar producción.
+- OBSERVAR/RECHAZAR comprobante no altera la reserva ni crea una nueva referencia.
+- Minutas y maestros se mantienen al depurar datos transaccionales de prueba.
+- Los módulos de Compras/OCR/Costos permanecen fuera de esta versión hasta terminar la estabilización.
+
+
 # v2.1.3.32 — Candidata Ingeniería
 
 - Finanzas: validación de comprobantes sin rerun por cambio de Validar/Observar/Rechazar; refresco inmediato tras guardar.

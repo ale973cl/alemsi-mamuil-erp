@@ -591,6 +591,21 @@ def init_db():
                 )
             """)
             execute_sql(s, """
+                CREATE TABLE IF NOT EXISTS registro_login (
+                    id SERIAL PRIMARY KEY,
+                    fecha TEXT,
+                    usuario TEXT,
+                    rol TEXT,
+                    evento TEXT,
+                    resultado TEXT,
+                    ip TEXT,
+                    zona_horaria TEXT,
+                    locale TEXT,
+                    user_agent TEXT,
+                    detalle TEXT
+                )
+            """)
+            execute_sql(s, """
                 CREATE TABLE IF NOT EXISTS migraciones_app (
                     clave TEXT PRIMARY KEY,
                     aplicado_at TEXT
