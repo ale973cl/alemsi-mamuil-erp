@@ -1,4 +1,4 @@
-# ALEMSI v2.1.3.33_ESTABILIZACION_PRUEBAS_REALES - cambios incrementales sobre v2.1.3.32
+# ALEMSI v2.1.3.34_CANDIDATA_DEMO_COORDINACION - cambios incrementales sobre v2.1.3.32
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime
@@ -1810,14 +1810,116 @@ def _render_platos_tres_columnas(df, plato_col="plato", valor_col="porciones"):
             st.progress(min(max(float(fila["porcentaje"]) / 100.0, 0.0), 1.0))
 
 
+def _asegurar_revision_coordinacion():
+    """Estructura incremental: no altera la minuta oficial; guarda solo revisión/propuestas."""
+    conn = get_conn()
+    with conn.session as ses:
+        execute_sql(ses, """
+            CREATE TABLE IF NOT EXISTS minuta_revision_coordinacion (
+                id SERIAL PRIMARY KEY, fecha TEXT NOT NULL, servicio TEXT NOT NULL,
+                tipo_opcion TEXT NOT NULL, plato_actual TEXT, accion TEXT NOT NULL,
+                observacion TEXT, plato_propuesto TEXT, usuario TEXT,
+                fecha_accion TEXT, estado TEXT DEFAULT 'Pendiente'
+            )
+        """)
+        ses.commit()
+
+
+def _sincronizar_maestro_platos():
+    """Agrega al maestro nombres históricos de minutas sin borrar ni cambiar costos existentes."""
+    conn = get_conn()
+    with conn.session as ses:
+        execute_sql(ses, """
+            INSERT INTO platos (nombre,servicio,valor,activo,descripcion)
+            SELECT DISTINCT TRIM(m.plato), m.servicio, 0, 1, 'Importado desde minuta histórica'
+            FROM minutas m
+            WHERE COALESCE(m.activo,1)=1 AND TRIM(COALESCE(m.plato,''))<>''
+              AND NOT EXISTS (
+                SELECT 1 FROM platos p
+                WHERE LOWER(TRIM(p.nombre))=LOWER(TRIM(m.plato))
+                  AND LOWER(TRIM(COALESCE(p.servicio,'')))=LOWER(TRIM(COALESCE(m.servicio,'')))
+              )
+        """)
+        ses.commit()
+
+
+def _alertas_preventivas_minuta(df):
+    """Semáforo orientativo; nunca bloquea la minuta."""
+    if df is None or df.empty: return []
+    alertas=[]
+    prot={"pollo":"pollo","cerdo":"cerdo","vacuno":"vacuno","carne":"vacuno","pescado":"pescado","atún":"pescado","atun":"pescado","pavo":"pavo"}
+    for fecha, grp in df.groupby('fecha'):
+        hall=[]
+        for plato in grp['plato'].astype(str):
+            low=plato.lower()
+            for k,v in prot.items():
+                if k in low: hall.append(v); break
+        reps=sorted({x for x in hall if hall.count(x)>1})
+        if reps: alertas.append(f"{fecha}: proteína repetida ({', '.join(reps)}).")
+        caldos=sum(any(k in str(x).lower() for k in ['sopa','caldo','carbonada','cazuela','valdiviano']) for x in grp['plato'])
+        if caldos>=2: alertas.append(f"{fecha}: revisar concentración de preparaciones húmedas/caldo.")
+    return alertas
+
+
+def render_coordinacion():
+    _asegurar_revision_coordinacion(); _sincronizar_maestro_platos()
+    conn=get_conn(); usuario=st.session_state.usuario
+    st.markdown("### 🤝 Coordinación · Revisión de Minutas")
+    st.caption("Acceso privado: visualizar, aprobar, observar o proponer cambios. La minuta oficial solo la modifica ALEMSI.")
+    mes=st.date_input("Mes a revisar", value=date.today().replace(day=1), key="coord_mes")
+    ini=mes.replace(day=1); fin=(ini+timedelta(days=32)).replace(day=1)-timedelta(days=1)
+    df=conn.query("SELECT fecha,servicio,tipo_opcion,plato FROM minutas WHERE activo=1 AND fecha>=:i AND fecha<=:f ORDER BY fecha,servicio,tipo_opcion",params={"i":ini.isoformat(),"f":fin.isoformat()},ttl=0)
+    if df.empty:
+        st.info("No hay minutas cargadas para este período."); return
+    alertas=_alertas_preventivas_minuta(df)
+    if alertas:
+        with st.expander(f"⚠️ Revisión preventiva · {len(alertas)} alerta(s)"):
+            for a in alertas: st.warning(a)
+    fechas=sorted(df['fecha'].astype(str).unique().tolist())
+    fecha_sel=st.selectbox("Día",fechas,key="coord_fecha")
+    dia=df[df['fecha'].astype(str)==fecha_sel].copy()
+    st.dataframe(dia.rename(columns={'servicio':'Servicio','tipo_opcion':'Opción','plato':'Plato'}),use_container_width=True,hide_index=True)
+    opciones=[f"{r.servicio} · {r.tipo_opcion} · {r.plato}" for r in dia.itertuples()]
+    elegido=st.selectbox("Preparación a revisar",opciones,key="coord_item")
+    idx=opciones.index(elegido); row=dia.iloc[idx]
+    accion=st.radio("Decisión",["APROBAR","OBSERVAR","PROPONER CAMBIO"],horizontal=True,key="coord_accion")
+    obs=st.text_area("Observación / solicitud",key="coord_obs",placeholder="Indica brevemente qué deseas cambiar o revisar.")
+    platos=conn.query("SELECT nombre FROM platos WHERE COALESCE(activo,1)=1 AND (servicio=:s OR COALESCE(servicio,'')='') ORDER BY nombre",params={'s':str(row['servicio'])},ttl=0)
+    propuesta=""
+    if accion=="PROPONER CAMBIO":
+        lista=['— Seleccionar de la base —'] + (platos['nombre'].dropna().astype(str).drop_duplicates().tolist() if not platos.empty else [])
+        propuesta=st.selectbox("Propuesta desde Maestro de Platos",lista,key="coord_prop")
+        libre=st.text_input("O sugerir otra preparación",key="coord_prop_libre")
+        if libre.strip(): propuesta=libre.strip()
+        elif propuesta.startswith('—'): propuesta=''
+    if st.button("Guardar revisión",type="primary",use_container_width=True,key="coord_guardar"):
+        if accion in ["OBSERVAR","PROPONER CAMBIO"] and not obs.strip():
+            st.error("Escribe la observación o motivo del cambio.")
+        elif accion=="PROPONER CAMBIO" and not propuesta:
+            st.error("Selecciona o escribe una propuesta.")
+        else:
+            with conn.session as ses:
+                execute_sql(ses,"INSERT INTO minuta_revision_coordinacion (fecha,servicio,tipo_opcion,plato_actual,accion,observacion,plato_propuesto,usuario,fecha_accion,estado) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",(fecha_sel,str(row['servicio']),str(row['tipo_opcion']),str(row['plato']),accion,obs.strip(),propuesta,str(usuario.get('username')),datetime.now().isoformat(),'Aprobado' if accion=='APROBAR' else 'Pendiente'))
+                ses.commit()
+            registrar_auditoria(usuario.get('username'),'REVISION_MINUTA_COORDINACION','minuta_revision_coordinacion',fecha_sel,str(row['plato']),propuesta or accion,obs.strip())
+            st.success("Revisión registrada. La minuta oficial no fue modificada."); st.rerun()
+    hist=conn.query("SELECT fecha,servicio,tipo_opcion,plato_actual,accion,observacion,plato_propuesto,usuario,fecha_accion,estado FROM minuta_revision_coordinacion WHERE fecha>=:i AND fecha<=:f ORDER BY fecha_accion DESC",params={'i':ini.isoformat(),'f':fin.isoformat()},ttl=0)
+    if not hist.empty:
+        with st.expander("Historial de revisión"):
+            st.dataframe(hist,use_container_width=True,hide_index=True)
+
+
 def render_casino():
     usuario = st.session_state.usuario
-    roles_casino = ["Cocina", "Finanzas", "Bodega"]
+    roles_casino = ["Cocina", "Finanzas", "Bodega", "Coordinacion"]
     if usuario and usuario.get("rol") in roles_casino:
         rol = str(usuario["rol"])
         st.markdown(f'<div class="al-card"><h3>{rol}</h3><p>¡Buen día, {usuario.get("nombre") or "equipo"}! Hoy es {datetime.now().strftime("%d/%m/%Y")}. Que tengan una excelente jornada.</p></div>', unsafe_allow_html=True)
 
-        if rol == "Cocina":
+        if rol == "Coordinacion":
+            render_coordinacion()
+
+        elif rol == "Cocina":
             if not permiso_habilitado(usuario.get('username'),'ver_cocina',True):
                 st.warning('Tu función Cocina está deshabilitada por el Administrador Total.')
                 return
@@ -3200,17 +3302,42 @@ def render_admin():
                     )
                     semana += timedelta(days=7)
             with st.expander("Agregar o editar minuta por fecha"):
-                with st.form("add_minuta_fecha"):
-                    fecha_n=st.date_input("Fecha",value=date.today(),key="min_fecha"); serv=st.selectbox("Servicio",["Desayuno","Almuerzo","Once","Cena"],key="min_serv"); opcion=st.selectbox("Opción",["OPCION 1","OPCION 2","HIPOCALORICO"],key="min_op"); plato=st.text_input("Nombre del plato*"); guardar=st.form_submit_button("Guardar minuta",type="primary",use_container_width=True)
-                if guardar and plato.strip():
-                    dnom=["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"][fecha_n.weekday()]
-                    with conn.session as ses:
-                        ex=execute_sql(ses,"SELECT id FROM minutas WHERE fecha=%s AND servicio=%s AND tipo_opcion=%s ORDER BY id LIMIT 1",(fecha_n.isoformat(),serv,opcion)).first()
-                        if ex: execute_sql(ses,"UPDATE minutas SET plato=%s,dia_semana=%s,activo=1 WHERE id=%s",(plato.strip(),dnom,ex[0]))
-                        else: execute_sql(ses,"INSERT INTO minutas (fecha,dia_semana,servicio,tipo_opcion,plato,activo) VALUES (%s,%s,%s,%s,%s,1)",(fecha_n.isoformat(),dnom,serv,opcion,plato.strip()))
-                        ses.commit()
-                    st.session_state["_flash_minuta"] = "✅ Minuta guardada y actualizada."
-                    st.rerun()
+                _sincronizar_maestro_platos()
+                fecha_n=st.date_input("Fecha",value=date.today(),key="min_fecha")
+                existentes_fecha=conn.query("SELECT servicio,tipo_opcion,plato FROM minutas WHERE activo=1 AND fecha=:f ORDER BY servicio,tipo_opcion",params={"f":fecha_n.isoformat()},ttl=0)
+                if not existentes_fecha.empty:
+                    st.caption("Minuta actualmente cargada para la fecha seleccionada")
+                    st.dataframe(existentes_fecha.rename(columns={"servicio":"Servicio","tipo_opcion":"Opción","plato":"Plato"}),use_container_width=True,hide_index=True)
+                else:
+                    st.info("No existe minuta cargada para este día. Puedes crearla desde el Maestro de Platos.")
+                serv=st.selectbox("Servicio",["Desayuno","Almuerzo","Once","Cena"],key="min_serv")
+                opcion=st.selectbox("Opción",["OPCION 1","OPCION 2","HIPOCALORICO"],key="min_op")
+                actual=""
+                if not existentes_fecha.empty:
+                    m=existentes_fecha[(existentes_fecha['servicio'].astype(str)==serv)&(existentes_fecha['tipo_opcion'].astype(str)==opcion)]
+                    if not m.empty: actual=str(m.iloc[0]['plato'] or '')
+                maestro=conn.query("SELECT nombre FROM platos WHERE COALESCE(activo,1)=1 AND (servicio=:s OR COALESCE(servicio,'')='') ORDER BY nombre",params={"s":serv},ttl=0)
+                nombres=maestro['nombre'].dropna().astype(str).drop_duplicates().tolist() if not maestro.empty else []
+                opciones_plato=['— Seleccionar plato —']+nombres
+                idx_actual=opciones_plato.index(actual) if actual in opciones_plato else 0
+                plato_sel=st.selectbox("Plato desde Maestro",opciones_plato,index=idx_actual,key=f"min_plato_{fecha_n.isoformat()}_{serv}_{opcion}")
+                plato_libre=st.text_input("O escribir / corregir nombre",value="" if actual in nombres else actual,key=f"min_libre_{fecha_n.isoformat()}_{serv}_{opcion}")
+                st.caption(f"Valor actual: {actual or 'Sin plato cargado'}")
+                if st.button("Guardar minuta",type="primary",use_container_width=True,key="guardar_minuta_fecha"):
+                    plato=(plato_libre.strip() or (plato_sel if not plato_sel.startswith('—') else '')).strip()
+                    if not plato:
+                        st.error("Selecciona o escribe un plato.")
+                    else:
+                        dnom=["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"][fecha_n.weekday()]
+                        with conn.session as ses:
+                            ex=execute_sql(ses,"SELECT id FROM minutas WHERE fecha=%s AND servicio=%s AND tipo_opcion=%s ORDER BY id LIMIT 1",(fecha_n.isoformat(),serv,opcion)).first()
+                            if ex: execute_sql(ses,"UPDATE minutas SET plato=%s,dia_semana=%s,activo=1 WHERE id=%s",(plato,dnom,ex[0]))
+                            else: execute_sql(ses,"INSERT INTO minutas (fecha,dia_semana,servicio,tipo_opcion,plato,activo) VALUES (%s,%s,%s,%s,%s,1)",(fecha_n.isoformat(),dnom,serv,opcion,plato))
+                            execute_sql(ses,"INSERT INTO platos (nombre,servicio,valor,activo,descripcion) SELECT %s,%s,0,1,'Creado desde editor de minuta' WHERE NOT EXISTS (SELECT 1 FROM platos WHERE LOWER(TRIM(nombre))=LOWER(TRIM(%s)) AND LOWER(TRIM(COALESCE(servicio,'')))=LOWER(TRIM(%s)))",(plato,serv,plato,serv))
+                            ses.commit()
+                        registrar_auditoria(st.session_state.usuario.get('username'),'EDITAR_MINUTA','minutas',fecha_n.isoformat(),actual,plato,f'{serv} · {opcion}')
+                        st.session_state["_flash_minuta"] = "✅ Minuta guardada y actualizada."
+                        st.rerun()
             with st.expander("Carga masiva CSV"):
                 st.caption("Columnas: fecha, servicio, tipo_opcion, plato"); archivo_csv=st.file_uploader("Archivo CSV",type=["csv"],key="minuta_csv_admin")
                 if archivo_csv is not None:
@@ -3447,7 +3574,7 @@ def render_admin():
                         nn = st.text_input("Nombre*")
                         ne = st.text_input("Correo de recuperación*")
                     with c2:
-                        nr = st.selectbox("Rol*", ["Cocina","Finanzas","Gerencia","AdminCasino","Bodega","AdminTotal"])
+                        nr = st.selectbox("Rol*", ["Cocina","Finanzas","Gerencia","AdminCasino","Bodega","Coordinacion","AdminTotal"])
                         st.info("La APP generará una contraseña temporal y enviará el acceso al correo registrado.")
                     crear = st.form_submit_button("Crear usuario y enviar acceso", type="primary", use_container_width=True)
                 if crear:
@@ -3481,7 +3608,7 @@ def render_admin():
                     with c1:
                         nombre_n = st.text_input("Nombre", value=str(rowu['nombre'] or ''))
                         correo_n = st.text_input("Correo de recuperación", value=str(rowu.get('correo') or ''))
-                        roles = ["Cocina","Finanzas","Gerencia","AdminCasino","Bodega","AdminTotal"]
+                        roles = ["Cocina","Finanzas","Gerencia","AdminCasino","Bodega","Coordinacion","AdminTotal"]
                         rol_actual = str(rowu['rol']) if str(rowu['rol']) in roles else "Cocina"
                         rol_n = st.selectbox("Rol", roles, index=roles.index(rol_actual))
                     with c2:

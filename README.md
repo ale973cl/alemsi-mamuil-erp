@@ -1,7 +1,3 @@
-# ALEMSI Mamuil Malal ERP
+ALEMSI ERP · v2.1.3.34 CANDIDATA DEMO COORDINACION
 
-Aplicación Streamlit para reservas, Cocina, Finanzas, Gerencia y Administración Total.
-
-Archivo de entrada: `streamlit_app.py`.
-
-La configuración de PostgreSQL/Supabase, SMTP y URL pública debe mantenerse en Streamlit Secrets. No subir secretos ni contraseñas a GitHub.
+Candidata para demo con personas. Subir el contenido completo de esta carpeta al repositorio.

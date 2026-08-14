@@ -1,3 +1,14 @@
+# v2.1.3.34 CANDIDATA DEMO COORDINACION
+
+- Nuevo rol Coordinacion por login principal.
+- Panel privado: ver, aprobar, observar y proponer cambios de minuta sin editar la minuta oficial.
+- Trazabilidad de revisiones de Coordinacion.
+- Revision preventiva orientativa de repeticiones de proteina y preparaciones humedas/caldo.
+- Editor de minuta por fecha ahora muestra la minuta existente y precarga el plato actual por servicio/opcion.
+- Maestro de Platos se consolida desde minutas historicas sin borrar platos ni alterar costos existentes.
+- Nuevos platos escritos desde el editor se agregan al maestro con valor 0 para posterior parametrizacion.
+- Mantiene reglas protegidas de Reserva, Finanzas, Produccion y Bodega de v33.
+
 # ALEMSI v2.1.3.33 — Estabilización para pruebas reales
 
 ## Correcciones incorporadas
