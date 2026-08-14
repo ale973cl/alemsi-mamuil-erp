@@ -1,4 +1,4 @@
-# ALEMSI v2.1.3.37_CANDIDATA_CIERRE_PERMISOS - cierre incremental, Coordinación y maestro de permisos
+# ALEMSI v2.1.3.38_CANDIDATA_COORDINACION_FISCALIZADOR - cierre incremental, Coordinación y maestro de permisos
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime
@@ -4498,3 +4498,22 @@ elif st.session_state.portal_actual == "administracion":
 
 st.divider()
 st.caption("© 2026 ALEMSI · Sistema de Alimentación Mamuil Malal")
+
+
+
+def _v38_permiso_visible(usuario, permiso, rol=None):
+    """Permiso efectivo para módulos delegables. AdminTotal siempre ve; otros dependen del permiso guardado."""
+    if str(rol or "").strip().lower() == "admintotal":
+        return True
+    try:
+        return bool(tiene_permiso(usuario, permiso))
+    except Exception:
+        return False
+
+# === v38 COORDINACION FISCALIZADOR ===
+# Regla de arquitectura:
+# - Coordinacion es un perfil externo fiscalizador.
+# - Entra por el login principal y se deriva a su panel privado.
+# - No pertenece al dashboard administrativo ni ve Finanzas/Bodega/Produccion/Usuarios.
+# - Sus capacidades delegables son revisar minutas y revisar recetas.
+# - Puede aprobar, observar/objetar y proponer cambios; nunca edita la minuta/receta oficial directamente.
