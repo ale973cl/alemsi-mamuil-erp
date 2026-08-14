@@ -201,9 +201,9 @@ def get_instituciones():
         df = conn.query("SELECT nombre FROM instituciones WHERE activa=1 ORDER BY nombre", ttl=300)
         if not df.empty:
             return df['nombre'].tolist()
-        return ["Visitas","Carabineros","PDI","SAG","Aduana","Chofer de Aduana","Alemsi","Coordinadores","Vialidad"]
+        return ["Visitas","Carabineros","PDI","SAG","Aduana","Chofer de Aduana","ALEMSI Paso Fronterizo","ALEMSI Administrativos","Coordinadores","Vialidad"]
     except:
-        return ["Visitas","Carabineros","PDI","SAG","Aduana","Chofer de Aduana","Alemsi","Coordinadores","Vialidad"]
+        return ["Visitas","Carabineros","PDI","SAG","Aduana","Chofer de Aduana","ALEMSI Paso Fronterizo","ALEMSI Administrativos","Coordinadores","Vialidad"]
 
 @st.cache_data(ttl=120, show_spinner=False)
 def get_precio_institucion(institucion: str):
@@ -606,6 +606,21 @@ def init_db():
                 )
             """)
             execute_sql(s, """
+                CREATE TABLE IF NOT EXISTS minuta_revision_coordinacion (
+                    id SERIAL PRIMARY KEY,
+                    fecha TEXT NOT NULL,
+                    servicio TEXT NOT NULL,
+                    tipo_opcion TEXT NOT NULL,
+                    plato_actual TEXT,
+                    accion TEXT NOT NULL,
+                    observacion TEXT,
+                    plato_propuesto TEXT,
+                    usuario TEXT,
+                    fecha_accion TEXT,
+                    estado TEXT DEFAULT 'Pendiente'
+                )
+            """)
+            execute_sql(s, """
                 CREATE TABLE IF NOT EXISTS migraciones_app (
                     clave TEXT PRIMARY KEY,
                     aplicado_at TEXT
@@ -767,7 +782,8 @@ def init_db():
                 ("SAG", 6400, None, 0, 1, "Precio estándar - sin regla"),
                 ("Aduana", 6400, None, 0, 1, "Precio estándar - sin regla"),
                 ("Chofer de Aduana", 6400, None, 0, 1, "Precio estándar - admin puede asignar 3400"),
-                ("Alemsi", 6400, None, 0, 1, "Precio estándar - admin puede asignar 0 gratis"),
+                ("ALEMSI Paso Fronterizo", 0, None, 0, 1, "Personal ALEMSI Paso Fronterizo - consumo interno sin cobro"),
+                ("ALEMSI Administrativos", 0, None, 0, 1, "Personal ALEMSI Administrativo - almuerzo interno sin cobro"),
                 ("Coordinadores", 6400, None, 0, 1, "Precio estándar"),
                 ("Vialidad", 6400, None, 0, 1, "Precio estándar"),
                 ("Visitas", 6400, None, 0, 1, "Precio estándar público"),
@@ -775,9 +791,15 @@ def init_db():
             for nombre, pdia, pesp, ract, act, desc in instituciones_default:
                 execute_sql(s, "INSERT INTO instituciones (nombre,precio_dia,precio_especial,regla_activa,activa,descripcion) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (nombre) DO NOTHING", (nombre, pdia, pesp, ract, act, desc))
 
-            # Regla comercial vigente: base estándar $6.400/día.
+            # MIG-35: normaliza la institución histórica "Alemsi" sin perder comensales.
+            # Se mantiene como compatibilidad únicamente si existía en versiones anteriores.
+            execute_sql(s, "UPDATE comensales SET institucion='ALEMSI Paso Fronterizo' WHERE LOWER(TRIM(COALESCE(institucion,'')))='alemsi'")
+            execute_sql(s, "UPDATE solicitudes SET institucion='ALEMSI Paso Fronterizo' WHERE LOWER(TRIM(COALESCE(institucion,'')))='alemsi'")
+            execute_sql(s, "UPDATE instituciones SET activa=0, descripcion='Migrado a ALEMSI Paso Fronterizo' WHERE LOWER(TRIM(nombre))='alemsi'")
+
+            # Regla comercial vigente: base estándar $6.400/día para instituciones cobrables.
             # Las excepciones se conservan en precio_especial + regla_activa.
-            execute_sql(s, "UPDATE instituciones SET precio_dia=6400 WHERE precio_dia IS NULL OR precio_dia<>6400")
+            execute_sql(s, "UPDATE instituciones SET precio_dia=6400 WHERE (precio_dia IS NULL OR precio_dia<>6400) AND nombre NOT IN ('ALEMSI Paso Fronterizo','ALEMSI Administrativos')")
 
             # Carga idempotente de la minuta real de agosto 2026 proveniente del PDF ALEMSI.
             minuta_csv = Path(__file__).with_name("minuta_agosto_2026.csv")

@@ -1,4 +1,4 @@
-# ALEMSI v2.1.3.34_CANDIDATA_DEMO_COORDINACION - cambios incrementales sobre v2.1.3.32
+# ALEMSI v2.1.3.35_CANDIDATA_PRODUCCION_DEMO - cierre incremental para demo/pruebas reales
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime
@@ -250,7 +250,9 @@ BACKUP_TABLES = [
     "jornadas_produccion", "jornada_detalle", "minutas", "platos", "recetas",
     "bodega_inventario", "mermas", "inventarios_fisicos", "instituciones",
     "excepciones_personas", "modalidades_pago", "usuarios", "usuarios_permisos",
-    "auditoria_acciones", "registro_login", "configuracion_correos", "configuracion_bancaria"
+    "auditoria_acciones", "registro_login", "configuracion_correos", "configuracion_bancaria",
+    "reclamos_sugerencias", "encuestas_satisfaccion", "tareas_inventario_cocina",
+    "inventarios_aleatorios", "minuta_revision_coordinacion"
 ]
 
 def generar_respaldo_logico(tipo="MANUAL"):
@@ -1155,7 +1157,14 @@ def render_comensal():
         tab_reserva, tab_reclamos = st.tabs(["📅 Reservar","💬 Reclamos"])
 
         with tab_reserva:
-            es_alemsi = str(institucion or "").strip().casefold() == "alemsi"
+            inst_cf = str(institucion or "").strip().casefold()
+            tipo_alemsi = (
+                "paso" if inst_cf in {"alemsi", "alemsi paso fronterizo"}
+                else "administrativos" if inst_cf == "alemsi administrativos"
+                else ""
+            )
+            es_alemsi = bool(tipo_alemsi)
+            es_coordinador_comensal = inst_cf == "coordinadores"
             resultado_anterior = st.session_state.get("resultado_reserva")
             if resultado_anterior:
                 if resultado_anterior.get("ok"):
@@ -1179,10 +1188,16 @@ def render_comensal():
                 st.stop()
 
             if es_alemsi:
-                st.info(
-                    "Personal ALEMSI: este registro sirve para planificar raciones y consumo de bodega. "
-                    "Solo se ofrece la Opción 1 y no se genera cobro, comprobante ni correo."
-                )
+                if tipo_alemsi == "paso":
+                    st.info(
+                        "ALEMSI Paso Fronterizo: solo se genera ración cuando existe una selección explícita. "
+                        "Puedes elegir Opción 1 o Hipocalórico según la minuta disponible. Sin selección = sin ración."
+                    )
+                else:
+                    st.info(
+                        "ALEMSI Administrativos: reserva interna sin cobro, normalmente solo Almuerzo. "
+                        "Puedes elegir cualquiera de las opciones disponibles del Almuerzo. Sin selección = sin ración."
+                    )
 
             if not st.session_state.dias_sel:
                 st.markdown("""
@@ -1364,30 +1379,46 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                     elecciones_dia = {}
                     with st.form(f"menu_dia_{f_iso}", clear_on_submit=False):
                         if es_alemsi:
-                            servicios_internos = ["Almuerzo", "Cena"]
+                            # PROD-35: toda ración interna ALEMSI requiere selección explícita.
+                            # Paso Fronterizo: Opción 1 o Hipocalórico. Administrativos: cualquiera de las 3 opciones del Almuerzo.
+                            orden_servicios_int = ["Desayuno", "Almuerzo", "Once", "Cena"]
+                            servicios_internos = ["Almuerzo"] if tipo_alemsi == "administrativos" else orden_servicios_int
+                            tipos_permitidos = {"OPCION 1", "OPCIÓN 1", "HIPOCALORICO", "HIPOCALÓRICO"} if tipo_alemsi == "paso" else {"OPCION 1", "OPCIÓN 1", "OPCION 2", "OPCIÓN 2", "HIPOCALORICO", "HIPOCALÓRICO"}
                             disponibles = 0
                             for servicio in servicios_internos:
-                                grupo = filas_fecha[filas_fecha["servicio"].astype(str) == servicio] if not filas_fecha.empty else pd.DataFrame()
-                                opcion_1 = grupo[grupo["tipo_opcion"].astype(str).str.casefold() == "opción 1".casefold()] if not grupo.empty else pd.DataFrame()
-                                if opcion_1.empty:
+                                grupo = filas_fecha[filas_fecha["servicio"].astype(str) == servicio].copy() if not filas_fecha.empty else pd.DataFrame()
+                                if grupo.empty:
+                                    continue
+                                grupo["tipo_norm"] = grupo["tipo_opcion"].fillna("").astype(str).str.strip().str.upper()
+                                grupo = grupo[grupo["tipo_norm"].isin(tipos_permitidos)]
+                                if grupo.empty:
                                     continue
                                 disponibles += 1
-                                plato = str(opcion_1.iloc[0]["plato"])
+                                tokens = [""]
+                                etiquetas = {"": f"— No reservar {servicio.lower()} —"}
+                                mapa = {}
+                                for pos, (_, rr) in enumerate(grupo.iterrows()):
+                                    tipo = str(rr.get("tipo_opcion") or "").strip()
+                                    plato = str(rr.get("plato") or "").strip()
+                                    token = f"{pos}|{tipo}|{plato}"
+                                    tokens.append(token); mapa[token] = {"plato": plato, "tipo_opcion": tipo, "estado": "Consumirá"}
+                                    etiquetas[token] = f"{tipo}: {plato}"
                                 actual = st.session_state.pedidos.get(f_iso, {}).get(servicio, {})
-                                estado_actual = actual.get("estado", "") if isinstance(actual, dict) else ""
-                                opciones_estado = ["", "Consumiré en casino", "No consumiré", "Llevaré comida propia"]
-                                indice = opciones_estado.index(estado_actual) if estado_actual in opciones_estado else 0
+                                actual_plato = actual.get("plato", "") if isinstance(actual, dict) else ""
+                                indice = 0
+                                for it, tok in enumerate(tokens):
+                                    if tok and tok.split("|", 2)[2] == actual_plato:
+                                        indice = it; break
                                 st.markdown(f"**{servicio}**")
-                                st.caption(f"Opción 1: {plato}")
-                                estado = st.selectbox(
-                                    "Estado", opciones_estado, index=indice,
-                                    format_func=lambda x: x or "— Selecciona una respuesta —",
-                                    key=f"alemsi_estado_{f_iso}_{servicio}", label_visibility="collapsed",
+                                elegido = st.selectbox(
+                                    f"Selecciona tu opción de {servicio}", tokens, index=indice,
+                                    format_func=lambda tok, labels=etiquetas: labels.get(tok, tok),
+                                    key=f"alemsi_menu_{tipo_alemsi}_{f_iso}_{servicio}",
                                 )
-                                if estado:
-                                    elecciones_dia[servicio] = {"plato": plato, "estado": estado}
+                                if elegido:
+                                    elecciones_dia[servicio] = mapa[elegido]
                             if disponibles == 0:
-                                st.warning("No existe Opción 1 de Almuerzo o Cena para esta fecha.")
+                                st.warning("No existen opciones habilitadas para este perfil ALEMSI en esta fecha.")
                         else:
                             orden_servicios = ["Desayuno", "Almuerzo", "Once", "Cena"]
                             iconos_servicio = {"Desayuno":"🍳", "Almuerzo":"🍽️", "Once":"☕", "Cena":"🌙"}
@@ -1452,10 +1483,8 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                         st.rerun()
                     if siguiente:
                         if es_alemsi:
-                            servicios_requeridos = [s for s in ["Almuerzo", "Cena"] if not filas_fecha[(filas_fecha["servicio"].astype(str)==s) & (filas_fecha["tipo_opcion"].astype(str).str.casefold()=="opción 1".casefold())].empty]
-                            faltan = [s for s in servicios_requeridos if s not in elecciones_dia]
-                            if faltan:
-                                st.error("Debes declarar todos los servicios disponibles: " + ", ".join(faltan))
+                            if not elecciones_dia:
+                                st.error("Selecciona al menos una ración para este día. Sin selección no se genera producción.")
                             else:
                                 st.session_state.pedidos[f_iso] = elecciones_dia
                                 if idx < len(dias)-1:
@@ -1485,7 +1514,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                         dnom = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"][f_obj.weekday()]
                         for servicio, seleccion_servicio in st.session_state.pedidos.get(f_iso, {}).items():
                             if es_alemsi:
-                                detalle.append((f_iso, dnom, servicio, seleccion_servicio["plato"], seleccion_servicio["estado"]))
+                                detalle.append((f_iso, dnom, servicio, seleccion_servicio["plato"], seleccion_servicio.get("tipo_opcion", "")))
                             else:
                                 detalle.append((f_iso, dnom, servicio, seleccion_servicio, get_precio(seleccion_servicio, servicio)))
 
@@ -1495,11 +1524,10 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                         st.stop()
 
                     if es_alemsi:
-                        df_detalle = pd.DataFrame(detalle, columns=["Fecha", "Día", "Servicio", "Opción 1", "Declaración"])
+                        df_detalle = pd.DataFrame(detalle, columns=["Fecha", "Día", "Servicio", "Plato", "Opción"])
                         st.dataframe(df_detalle, use_container_width=True, hide_index=True)
-                        consumos = int((df_detalle["Declaración"] == "Consumiré en casino").sum())
-                        st.metric("Raciones declaradas", consumos)
-                        st.caption("Este registro no genera cobro, código, comprobante ni correo.")
+                        st.metric("Raciones reservadas", len(df_detalle))
+                        st.caption("Solo las selecciones mostradas sumarán a Producción. No genera cobro ni comprobante de pago.")
                         with st.form("confirmar_consumo_alemsi_v21"):
                             c1, c2 = st.columns(2)
                             with c1:
@@ -1518,9 +1546,13 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                         with c1:
                             st.metric("Días reservados", len(dias))
                         with c2:
-                            st.metric("Total a pagar", formato_clp(total_real))
+                            st.metric("Valor referencial" if es_coordinador_comensal else "Total a pagar", formato_clp(total_real))
                         with st.form("confirmar_reserva_comercial_v21"):
-                            metodo = st.selectbox("Método de pago*", ["Transferencia bancaria", "Débito en la instalación"])
+                            if es_coordinador_comensal:
+                                metodo = "Costo asumido · Coordinadores"
+                                st.info("Coordinadores: el consumo se valoriza para control financiero, pero no genera cobro ni bloquea futuras reservas.")
+                            else:
+                                metodo = st.selectbox("Método de pago*", ["Transferencia bancaria", "Débito en la instalación"])
                             aceptar = st.checkbox("Confirmo que las fechas, servicios y platos son correctos.")
                             c1, c2 = st.columns(2)
                             with c1:
@@ -1544,12 +1576,8 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                         try:
                             with conn.session as sesion:
                                 if es_alemsi:
-                                    for f_iso, dnom, servicio, plato, declaracion in detalle:
-                                        estado_bd = {
-                                            "Consumiré en casino": "Consumirá",
-                                            "No consumiré": "No consumirá",
-                                            "Llevaré comida propia": "Comida propia",
-                                        }[declaracion]
+                                    for f_iso, dnom, servicio, plato, tipo_opcion_int in detalle:
+                                        estado_bd = "Consumirá"
                                         clave_bloqueo = f"{rut}|{f_iso}|{servicio}"
                                         execute_sql(sesion, "SELECT pg_advisory_xact_lock(hashtext(%s))", (clave_bloqueo,))
                                         existente = execute_sql(
@@ -1598,7 +1626,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                             execute_sql(
                                                 sesion,
                                                 "UPDATE solicitudes SET plato=%s,plato_reservado=%s,precio=%s,precio_aplicado=%s,institucion=%s,correo=%s,metodo_pago=%s,estado_pago=%s,estado_consumo=%s,fecha_modificacion=%s,modificado_por=%s,referencia_reserva=%s,tipo_registro=%s WHERE id=%s",
-                                                (plato, plato, precio_por_linea[(f_iso, servicio, plato)], precio_por_linea[(f_iso, servicio, plato)], institucion, correo_cli, metodo, "Pendiente", "Pendiente", ahora_iso, rut, referencia_reserva, "RESERVA_COMERCIAL", existente["id"]),
+                                                (plato, plato, precio_por_linea[(f_iso, servicio, plato)], precio_por_linea[(f_iso, servicio, plato)], institucion, correo_cli, metodo, "Costo asumido" if es_coordinador_comensal else "Pendiente", "Pendiente", ahora_iso, rut, referencia_reserva, "CONSUMO_COORDINADOR" if es_coordinador_comensal else "RESERVA_COMERCIAL", existente["id"]),
                                             )
                                         else:
                                             execute_sql(
@@ -1606,7 +1634,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                                 "INSERT INTO solicitudes "
                                                 "(rut,fecha,servicio,plato,plato_reservado,codigo,precio,precio_aplicado,institucion,correo,metodo_pago,estado_pago,estado_consumo,fecha_creacion,fecha_modificacion,modificado_por,referencia_reserva,tipo_registro) "
                                                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                                                (rut, f_iso, servicio, plato, plato, codigo, precio_por_linea[(f_iso, servicio, plato)], precio_por_linea[(f_iso, servicio, plato)], institucion, correo_cli, metodo, "Pendiente", "Pendiente", ahora_iso, ahora_iso, rut, referencia_reserva, "RESERVA_COMERCIAL"),
+                                                (rut, f_iso, servicio, plato, plato, codigo, precio_por_linea[(f_iso, servicio, plato)], precio_por_linea[(f_iso, servicio, plato)], institucion, correo_cli, metodo, "Costo asumido" if es_coordinador_comensal else "Pendiente", "Pendiente", ahora_iso, ahora_iso, rut, referencia_reserva, "CONSUMO_COORDINADOR" if es_coordinador_comensal else "RESERVA_COMERCIAL"),
                                             )
                                         vouchers.append(codigo)
                                 sesion.commit()
@@ -1626,28 +1654,44 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                 f"{['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'][date.fromisoformat(f).weekday()]} {date.fromisoformat(f).strftime('%d/%m')}"
                                 for f in dias
                             )
-                            pago_token = secrets.token_urlsafe(32)
-                            with conn.session as sesion_token:
-                                execute_sql(sesion_token, "UPDATE solicitudes SET pago_token=%s WHERE referencia_reserva=%s", (pago_token, referencia_reserva))
-                                sesion_token.commit()
-                            url_comprobante = _url_carga_comprobante(pago_token)
+                            if es_coordinador_comensal:
+                                pago_token = ""
+                                url_comprobante = ""
+                                bloque_link = "<p style='margin:18px 0;background:#eef6ff;padding:12px;border-radius:8px'><b>Consumo valorizado para control interno.</b> No requiere pago ni comprobante.</p>"
+                                banco_cfg = {}
+                            else:
+                                pago_token = secrets.token_urlsafe(32)
+                                with conn.session as sesion_token:
+                                    execute_sql(sesion_token, "UPDATE solicitudes SET pago_token=%s WHERE referencia_reserva=%s", (pago_token, referencia_reserva))
+                                    sesion_token.commit()
+                                url_comprobante = _url_carga_comprobante(pago_token)
+                                bloque_link = f"<p style='margin:18px 0'><a href='{url_comprobante}' style='background:#086B37;color:white;padding:12px 18px;text-decoration:none;border-radius:8px;font-weight:bold'>SUBIR COMPROBANTE DE PAGO</a></p>"
+                                banco_cfg = get_config_bancaria() if str(metodo).strip().casefold() == "transferencia bancaria".casefold() else {}
                             detalle_html = _detalle_html_por_dia(detalle)
                             pdf_reserva = generar_pdf_reserva(nombre,rut,institucion,referencia_reserva,detalle,precio_dia,total_real,metodo,url_comprobante)
-                            bloque_link = f"<p style='margin:18px 0'><a href='{url_comprobante}' style='background:#086B37;color:white;padding:12px 18px;text-decoration:none;border-radius:8px;font-weight:bold'>SUBIR COMPROBANTE DE PAGO</a></p>"
-                            banco_cfg = get_config_bancaria() if str(metodo).strip().casefold() == "transferencia bancaria".casefold() else {}
                             if banco_cfg:
                                 bloque_banco = f"""
                                 <div style='background:#f7fbfa;border:1px solid #cfe3df;padding:14px;border-radius:10px;margin:14px 0'>
                                   <h3 style='margin-top:0;color:#0A2F6B'>Datos para transferencia</h3>
-                                  <p style='margin:4px 0'><b>Titular / Razón Social:</b> {banco_cfg.get('titular','')}</p>
-                                  <p style='margin:4px 0'><b>RUT:</b> {banco_cfg.get('rut','')}</p>
-                                  <p style='margin:4px 0'><b>Banco:</b> {banco_cfg.get('banco','')}</p>
-                                  <p style='margin:4px 0'><b>Tipo de cuenta:</b> {banco_cfg.get('tipo_cuenta','')}</p>
-                                  <p style='margin:4px 0'><b>N° de cuenta:</b> {banco_cfg.get('numero_cuenta','')}</p>
-                                  <p style='margin:4px 0'><b>Correo:</b> {banco_cfg.get('correo_comprobantes','')}</p>
-                                  <p style='margin:8px 0 0'><b>Monto:</b> {formato_clp(total_real)}</p>
-                                  <p style='margin:4px 0'><b>Referencia:</b> {referencia_reserva}</p>
-                                  <p style='font-size:12px;color:#666'>Los datos están separados para facilitar copiar y pegar en la banca electrónica.</p>
+                                  <p style='font-size:12px;color:#666'>Cada dato está en una línea independiente para copiarlo fácilmente desde el teléfono.</p>
+                                  <div style='font-size:15px;line-height:1.75'>
+                                    <div><b>Titular:</b><br><span style='font-family:monospace'>{banco_cfg.get('titular','')}</span></div>
+                                    <div><b>RUT:</b><br><span style='font-family:monospace'>{banco_cfg.get('rut','')}</span></div>
+                                    <div><b>Banco:</b><br><span style='font-family:monospace'>{banco_cfg.get('banco','')}</span></div>
+                                    <div><b>Tipo de cuenta:</b><br><span style='font-family:monospace'>{banco_cfg.get('tipo_cuenta','')}</span></div>
+                                    <div><b>N° de cuenta:</b><br><span style='font-family:monospace'>{banco_cfg.get('numero_cuenta','')}</span></div>
+                                    <div><b>Correo:</b><br><span style='font-family:monospace'>{banco_cfg.get('correo_comprobantes','')}</span></div>
+                                    <div><b>Monto:</b><br><span style='font-family:monospace'>{formato_clp(total_real)}</span></div>
+                                    <div><b>Referencia:</b><br><span style='font-family:monospace'>{referencia_reserva}</span></div>
+                                  </div>
+                                  <div style='margin-top:12px;padding:10px;background:#fff;border:1px dashed #b9d2ca;border-radius:8px;font-family:monospace;white-space:pre-line'>Titular: {banco_cfg.get('titular','')}
+RUT: {banco_cfg.get('rut','')}
+Banco: {banco_cfg.get('banco','')}
+Tipo: {banco_cfg.get('tipo_cuenta','')}
+Cuenta: {banco_cfg.get('numero_cuenta','')}
+Correo: {banco_cfg.get('correo_comprobantes','')}
+Monto: {formato_clp(total_real)}
+Referencia: {referencia_reserva}</div>
                                 </div>
                                 """
                             else:
@@ -1660,7 +1704,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                               <p><b>RUT:</b> {rut} · <b>Institución:</b> {institucion}</p>
                               <p><b>Fecha de emisión:</b> {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
                               <p><b>Días:</b> {len(dias)} · <b>Valor total de la reserva:</b> {formato_clp(total_real)}</p>
-                              <p><b>Método de pago:</b> {metodo} · <b>Estado:</b> Pendiente</p>
+                              <p><b>Modalidad:</b> {metodo} · <b>Estado:</b> {'Costo asumido / no cobrable' if es_coordinador_comensal else 'Pendiente'}</p>
                               {bloque_banco}
                               <p><b>Fechas:</b> {resumen_fechas}</p>
                               <h3 style="color:#0A2F6B">Detalle de reserva</h3>{detalle_html}
@@ -1871,6 +1915,37 @@ def render_coordinacion():
     df=conn.query("SELECT fecha,servicio,tipo_opcion,plato FROM minutas WHERE activo=1 AND fecha>=:i AND fecha<=:f ORDER BY fecha,servicio,tipo_opcion",params={"i":ini.isoformat(),"f":fin.isoformat()},ttl=0)
     if df.empty:
         st.info("No hay minutas cargadas para este período."); return
+
+    # COORD-35: panel personal con la última observación/propuesta por día/servicio/opción.
+    pendientes = conn.query(
+        """
+        SELECT DISTINCT ON (r.fecha,r.servicio,r.tipo_opcion)
+               r.fecha,r.servicio,r.tipo_opcion,r.plato_actual,r.accion,r.observacion,r.plato_propuesto,r.fecha_accion,r.estado,
+               m.plato AS plato_actual_minuta
+        FROM minuta_revision_coordinacion r
+        LEFT JOIN minutas m ON m.fecha=r.fecha AND m.servicio=r.servicio AND m.tipo_opcion=r.tipo_opcion AND m.activo=1
+        WHERE r.usuario=:u AND r.fecha>=:i AND r.fecha<=:f
+        ORDER BY r.fecha,r.servicio,r.tipo_opcion,r.fecha_accion DESC,r.id DESC
+        """,
+        params={"u":str(usuario.get("username")),"i":ini.isoformat(),"f":fin.isoformat()}, ttl=0
+    )
+    if not pendientes.empty:
+        pendientes = pendientes[pendientes["accion"].astype(str)!="APROBAR"].copy()
+        if not pendientes.empty:
+            pendientes["Estado revisión"] = pendientes.apply(
+                lambda r: "Corregido · pendiente nueva aprobación"
+                if str(r.get("plato_actual_minuta") or "").strip() and str(r.get("plato_actual_minuta") or "").strip() != str(r.get("plato_actual") or "").strip()
+                else "Pendiente de corrección", axis=1
+            )
+            with st.expander(f"📝 Mis días observados / pendientes · {len(pendientes)}", expanded=True):
+                st.dataframe(
+                    pendientes[["fecha","servicio","tipo_opcion","plato_actual","plato_actual_minuta","accion","observacion","plato_propuesto","Estado revisión","fecha_accion"]].rename(columns={
+                        "fecha":"Fecha","servicio":"Servicio","tipo_opcion":"Opción","plato_actual":"Plato observado",
+                        "plato_actual_minuta":"Plato vigente","accion":"Acción","observacion":"Observación",
+                        "plato_propuesto":"Propuesta","fecha_accion":"Fecha / hora"
+                    }), use_container_width=True, hide_index=True
+                )
+
     alertas=_alertas_preventivas_minuta(df)
     if alertas:
         with st.expander(f"⚠️ Revisión preventiva · {len(alertas)} alerta(s)"):
@@ -2085,6 +2160,17 @@ def render_casino():
                              COALESCE(m.tipo_opcion,''), COALESCE(s.plato_reservado,s.plato)
                     """, params={"fecha":fecha_iso}, ttl=10)
 
+                df_alemsi_personas = conn.query(
+                    """
+                    SELECT c.nombre,s.rut,s.institucion,s.servicio,COALESCE(s.plato_reservado,s.plato) AS plato
+                    FROM solicitudes s
+                    LEFT JOIN comensales c ON c.rut=s.rut
+                    WHERE s.fecha=:fecha AND COALESCE(s.tipo_registro,'')='CONSUMO_INTERNO'
+                      AND s.estado_consumo='Consumirá'
+                    ORDER BY s.institucion,c.nombre,s.servicio
+                    """, params={"fecha":fecha_iso}, ttl=10
+                )
+
                 estado_j = conn.query("SELECT * FROM jornadas_produccion WHERE fecha=:f", params={"f":fecha_iso}, ttl=0)
                 estado = str(estado_j.iloc[0]["estado"]) if not estado_j.empty else "Pendiente"
                 st.info(f"Estado de la jornada: **{estado}**")
@@ -2103,6 +2189,16 @@ def render_casino():
                         g["Opción"] = g["tipo_opcion"].replace({"OPCION 1":"1","OPCION 2":"2","HIPOCALORICO":"Hipocalórico","":"—"})
                         st.dataframe(g[["Opción","plato","reservadas"]].rename(columns={"plato":"Plato","reservadas":"Reservadas"}), use_container_width=True, hide_index=True)
                     st.metric("TOTAL JORNADA RESERVADA", total_dia)
+                    if not df_alemsi_personas.empty:
+                        st.markdown("### 👥 Personal ALEMSI reservado")
+                        st.caption("Listado nominal para entrega controlada. Solo aparecen personas con una selección válida.")
+                        st.dataframe(
+                            df_alemsi_personas.rename(columns={
+                                "nombre":"Nombre","rut":"RUT","institucion":"Grupo",
+                                "servicio":"Servicio","plato":"Plato reservado"
+                            }),
+                            use_container_width=True, hide_index=True
+                        )
 
                 if st.button("👁️ Visualizar jornada completa", use_container_width=True):
                     st.session_state["ver_jornada"] = fecha_iso
@@ -2112,13 +2208,55 @@ def render_casino():
                 if estado == "Pendiente":
                     confirmar = st.checkbox(f"Confirmo iniciar la jornada completa del {fecha_j.strftime('%d/%m/%Y')}", key=f"conf_ini_j_{fecha_iso}")
                     if st.button("▶️ INICIAR JORNADA", type="primary", use_container_width=True, disabled=not confirmar):
+                        sin_receta = []
+                        faltantes_stock = []
+                        ya_iniciada = False
                         with conn.session as ses:
-                            execute_sql(ses, "INSERT INTO jornadas_produccion (fecha,estado,inicio_at,usuario_inicio) VALUES (%s,'En producción',%s,%s) ON CONFLICT (fecha) DO UPDATE SET estado='En producción',inicio_at=EXCLUDED.inicio_at,usuario_inicio=EXCLUDED.usuario_inicio", (fecha_iso,datetime.now().isoformat(),usuario.get('username')))
-                            for _,r in df_prod.iterrows():
-                                execute_sql(ses, "INSERT INTO jornada_detalle (fecha,servicio,tipo_opcion,plato,reservadas,producidas,entregadas) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (fecha,servicio,tipo_opcion,plato) DO UPDATE SET reservadas=EXCLUDED.reservadas", (fecha_iso,str(r['servicio']),str(r['tipo_opcion']),str(r['plato']),int(r['reservadas']),int(r['reservadas']),0))
-                            ses.commit()
-                        registrar_auditoria(usuario.get('username'),'INICIAR_JORNADA','jornadas_produccion',fecha_iso,'Pendiente','En producción','')
-                        st.success("Jornada iniciada. Se congelaron las cantidades reservadas para control. El descuento definitivo de Bodega permanece desactivado en esta prueba.")
+                            # PROD-35: bloqueo transaccional para impedir doble inicio/doble descuento.
+                            execute_sql(ses, "SELECT pg_advisory_xact_lock(hashtext(%s))", (f"PRODUCCION|{fecha_iso}",))
+                            existente_j = execute_sql(ses, "SELECT estado FROM jornadas_produccion WHERE fecha=%s FOR UPDATE", (fecha_iso,)).first()
+                            if existente_j and str(existente_j[0]) != "Pendiente":
+                                ya_iniciada = True
+                            else:
+                                execute_sql(ses, "INSERT INTO jornadas_produccion (fecha,estado,inicio_at,usuario_inicio) VALUES (%s,'En producción',%s,%s) ON CONFLICT (fecha) DO UPDATE SET estado='En producción',inicio_at=EXCLUDED.inicio_at,usuario_inicio=EXCLUDED.usuario_inicio", (fecha_iso,datetime.now().isoformat(),usuario.get('username')))
+                                for _,r in df_prod.iterrows():
+                                    plato_prod = str(r['plato'])
+                                    porciones = int(r['reservadas'])
+                                    execute_sql(ses, "INSERT INTO jornada_detalle (fecha,servicio,tipo_opcion,plato,reservadas,producidas,entregadas) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (fecha,servicio,tipo_opcion,plato) DO UPDATE SET reservadas=EXCLUDED.reservadas", (fecha_iso,str(r['servicio']),str(r['tipo_opcion']),plato_prod,porciones,porciones,0))
+
+                                    recetas = execute_sql(ses, "SELECT insumo,cantidad FROM recetas WHERE LOWER(TRIM(plato))=LOWER(TRIM(%s)) AND COALESCE(estado,'BORRADOR') IN ('ACTIVA','ACTIVO','APROBADA','APROBADO','BORRADOR')", (plato_prod,)).mappings().all()
+                                    if not recetas:
+                                        sin_receta.append(plato_prod)
+                                        continue
+                                    for rec in recetas:
+                                        requerido = float(rec['cantidad'] or 0) * porciones
+                                        if requerido <= 0:
+                                            continue
+                                        lotes = execute_sql(ses, "SELECT id,stock,nombre_articulo FROM bodega_inventario WHERE nombre_articulo ILIKE %s AND COALESCE(stock,0)>0 ORDER BY caduca ASC NULLS LAST,id ASC FOR UPDATE", (f"%{rec['insumo']}%",)).mappings().all()
+                                        pendiente = requerido
+                                        for lote in lotes:
+                                            if pendiente <= 0: break
+                                            disponible = float(lote['stock'] or 0)
+                                            uso = min(disponible, pendiente)
+                                            execute_sql(ses, "UPDATE bodega_inventario SET stock=GREATEST(COALESCE(stock,0)-%s,0) WHERE id=%s", (uso,lote['id']))
+                                            pendiente -= uso
+                                        if pendiente > 0.0001:
+                                            faltantes_stock.append(f"{rec['insumo']} ({pendiente:.2f} pendiente)")
+                                ses.commit()
+                        if ya_iniciada:
+                            st.warning("La jornada ya había sido iniciada. No se realizó un segundo descuento de Bodega.")
+                        else:
+                            detalle_alerta = []
+                            if sin_receta:
+                                detalle_alerta.append("sin receta: " + ", ".join(sorted(set(sin_receta))))
+                            if faltantes_stock:
+                                detalle_alerta.append("stock insuficiente: " + ", ".join(sorted(set(faltantes_stock))))
+                            registrar_auditoria(usuario.get('username'),'INICIAR_JORNADA','jornadas_produccion',fecha_iso,'Pendiente','En producción','; '.join(detalle_alerta))
+                            st.success("Jornada iniciada. Se congeló la producción y se descontó Bodega según las recetas disponibles, una sola vez.")
+                            if sin_receta:
+                                st.warning("Producción registrada sin descuento automático para platos sin receta: " + ", ".join(sorted(set(sin_receta))))
+                            if faltantes_stock:
+                                st.warning("La producción quedó registrada, pero hubo faltantes de stock para: " + ", ".join(sorted(set(faltantes_stock))))
                         st.rerun()
 
                 elif estado == "En producción":
@@ -2855,10 +2993,14 @@ def render_casino():
                 else: st.error("Usuario no válido, deshabilitado o sin permiso para Personal de Casino.")
 
 def render_admin():
-    if st.session_state.usuario and st.session_state.usuario["rol"] in ["AdminTotal","AdminCasino","Operaciones","Gerencia"]:
+    if st.session_state.usuario and st.session_state.usuario["rol"] in ["AdminTotal","AdminCasino","Operaciones","Gerencia","Bodega"]:
         st.markdown(f'<div class="al-card"><h3>🏢 Administración y Control de Gestión</h3><p>Información consolidada para la gestión operativa y financiera.</p></div>', unsafe_allow_html=True)
         rol_admin = str(st.session_state.usuario.get("rol", ""))
-        modulos_admin = ["📈 Dashboard","📊 Reportes","📋 Planilla de Reservas","📦 Inventario y Bodega","🍽️ Minutas","⚖️ Excepciones","🏢 Instituciones","💳 Modalidades de Pago","📧 Correos"]
+        if rol_admin == "Bodega":
+            # PERF-35: Bodega reutiliza exactamente la misma gestión de Minutas; no se mantiene una copia paralela.
+            modulos_admin = ["📦 Inventario y Bodega","🍽️ Minutas"]
+        else:
+            modulos_admin = ["📈 Dashboard","📊 Reportes","📋 Planilla de Reservas","📦 Inventario y Bodega","🍽️ Minutas","⚖️ Excepciones","🏢 Instituciones","💳 Modalidades de Pago","📧 Correos"]
         if rol_admin == "AdminTotal":
             modulos_admin += ["🏦 Datos transferencia","👥 Usuarios","🧭 Actividad","🧹 Depuración","🛡️ Respaldo"]
         modulo_admin = st.radio("Módulo", modulos_admin, horizontal=True, key="modulo_admin_activo", label_visibility="collapsed")
@@ -3543,6 +3685,23 @@ def render_admin():
                 vista_usuarios["Cambio contraseña"] = vista_usuarios["debe_cambiar_password"].apply(lambda x: "Pendiente" if int(x or 0) == 1 else "No")
                 st.dataframe(vista_usuarios[["username","nombre","correo","rol","Estado","Cambio contraseña","fecha_creacion"]].rename(columns={"username":"Usuario","nombre":"Nombre","correo":"Correo","rol":"Perfil","fecha_creacion":"Fecha de creación"}), use_container_width=True, hide_index=True)
 
+                with st.expander("📨 Notificación masiva de acceso", expanded=False):
+                    st.caption("Envía a cada usuario activo con correo válido su usuario, perfil y enlace de ingreso. No modifica ni revela contraseñas.")
+                    candidatos = dfu[(dfu["activo"].astype(int)==1) & dfu["correo"].fillna("").astype(str).str.contains("@", regex=False)].copy()
+                    st.write(f"Usuarios notificables: {len(candidatos)}")
+                    confirmar_masivo = st.checkbox("Confirmo el envío de recordatorios de acceso", key="confirmar_notif_masiva")
+                    if st.button("Enviar accesos al personal", use_container_width=True, disabled=not confirmar_masivo, key="enviar_notif_masiva"):
+                        enviados=0; fallidos=[]
+                        for _,ru in candidatos.iterrows():
+                            ok,msg = notificar_ingreso_usuario(str(ru.get("correo") or ""), str(ru.get("nombre") or ru.get("username")), str(ru.get("username")), str(ru.get("rol")))
+                            if ok: enviados += 1
+                            else: fallidos.append(f"{ru.get('username')}: {msg}")
+                        registrar_auditoria(st.session_state.usuario.get("username"),"NOTIFICACION_MASIVA_ACCESO","usuarios","",str(len(candidatos)),str(enviados),"; ".join(fallidos[:10]))
+                        if enviados: st.success(f"Recordatorio enviado a {enviados} usuario(s).")
+                        if fallidos:
+                            st.warning(f"{len(fallidos)} envío(s) fallaron. Revisa correo/SMTP antes de repetir.")
+                            st.code("\n".join(fallidos[:20]))
+
                 with st.expander("🧪 Modo pruebas · contraseña común", expanded=False):
                     st.warning("Uso temporal de QA. No debe mantenerse en producción. Conserva usernames, roles y permisos; solo cambia la contraseña de las cuentas seleccionadas.")
                     usuarios_activos = dfu[dfu["activo"].astype(int) == 1]["username"].astype(str).tolist()
@@ -3704,10 +3863,13 @@ def render_admin():
                 c1.metric("Eventos de acceso",len(df_login))
                 c2.metric("Inicios OK",int((df_login["evento"].astype(str).eq("INICIO") & df_login["resultado"].astype(str).eq("OK")).sum()) if not df_login.empty else 0)
                 c3.metric("Intentos fallidos",int(df_login["resultado"].astype(str).eq("FALLIDO").sum()) if not df_login.empty else 0)
+                if not df_login.empty:
+                    df_login = df_login.copy()
+                    df_login["fecha"] = pd.to_datetime(df_login["fecha"], errors="coerce").dt.strftime("%d/%m/%Y %H:%M:%S").fillna(df_login["fecha"].astype(str))
                 st.dataframe(_tabla_visible(df_login,{
                     "fecha":"Fecha / hora","usuario":"Usuario","rol":"Perfil","evento":"Evento","resultado":"Resultado",
                     "ip":"IP","zona_horaria":"Zona horaria","locale":"Locale","detalle":"Detalle"
-                },["fecha"]),use_container_width=True,hide_index=True)
+                }),use_container_width=True,hide_index=True)
 
                 st.markdown("##### Acciones auditadas")
                 params_aud={"desde":fecha_desde}
@@ -3720,10 +3882,13 @@ def render_admin():
                     params_aud["usuario"]=usuario_act
                 sql_aud += " ORDER BY id DESC LIMIT 1000"
                 df_aud=conn.query(sql_aud,params=params_aud,ttl=0)
+                if not df_aud.empty:
+                    df_aud = df_aud.copy()
+                    df_aud["fecha"] = pd.to_datetime(df_aud["fecha"], errors="coerce").dt.strftime("%d/%m/%Y %H:%M:%S").fillna(df_aud["fecha"].astype(str))
                 st.dataframe(_tabla_visible(df_aud,{
                     "fecha":"Fecha / hora","usuario":"Usuario","accion":"Acción","entidad":"Entidad",
                     "referencia":"Referencia","valor_anterior":"Anterior","valor_nuevo":"Nuevo","motivo":"Motivo"
-                },["fecha"]),use_container_width=True,hide_index=True)
+                }),use_container_width=True,hide_index=True)
                 if not df_login.empty:
                     st.download_button(
                         "⬇️ Descargar registro de login CSV",
@@ -3732,17 +3897,33 @@ def render_admin():
                     )
 
         if modulo_admin == "🧹 Depuración":
-            st.markdown("#### 🧹 Depuración de reservas y comensales")
+            st.markdown("#### 🧹 Preparar base para producción")
             if st.session_state.usuario.get('rol')!='AdminTotal': st.info("Esta herramienta es exclusiva del Administrador Total.")
             else:
-                st.warning("Herramienta para limpiar datos de prueba. No modifica usuarios, minutas, recetas, instituciones ni configuración.")
+                st.warning("Limpia datos transaccionales de prueba y conserva Minutas, Platos, Recetas, Usuarios, Instituciones, permisos y configuración. Genera y descarga/verifica un respaldo antes de ejecutar.")
                 conn=get_conn(); nr=conn.query("SELECT COUNT(*) AS n FROM solicitudes",ttl=0); nc=conn.query("SELECT COUNT(*) AS n FROM comensales",ttl=0); c1,c2=st.columns(2); c1.metric('Registros de reserva',int(nr.iloc[0]['n']) if not nr.empty else 0); c2.metric('Comensales',int(nc.iloc[0]['n']) if not nc.empty else 0)
-                confirmar=st.text_input("Escribe DEPURAR para habilitar",key='depurar_confirm')
-                if st.button("Depurar reservas y comensales",type='primary',use_container_width=True,disabled=confirmar.strip().upper()!='DEPURAR'):
+                respaldo_ok = bool(st.session_state.get("ultimo_backup_bytes"))
+                st.info("✅ Respaldo generado en esta sesión." if respaldo_ok else "⚠️ Primero ve a Respaldo y genera una copia verificable en esta misma sesión.")
+                limpiar_bodega = st.checkbox("También reiniciar inventario/stock de Bodega (solo si los datos actuales son de prueba)", value=False, key="depurar_bodega_prod")
+                confirmar=st.text_input("Escribe DEPURAR PRODUCCION para habilitar",key='depurar_confirm')
+                habilitado = respaldo_ok and confirmar.strip().upper()=='DEPURAR PRODUCCION'
+                if st.button("Limpiar datos de prueba para producción",type='primary',use_container_width=True,disabled=not habilitado):
+                    tablas_trans = [
+                        'comprobantes_pago','ajustes_financieros','jornada_detalle','jornadas_produccion',
+                        'solicitudes','comensales','reclamos_sugerencias','encuestas_satisfaccion',
+                        'minuta_revision_coordinacion','mermas','inventarios_fisicos','inventarios_aleatorios',
+                        'tareas_inventario_cocina','registro_login','auditoria_acciones'
+                    ]
                     with conn.session as ses:
-                        for tabla in ['comprobantes_pago','ajustes_financieros','jornada_detalle','jornadas_produccion','solicitudes','comensales']: execute_sql(ses,f"DELETE FROM {tabla}")
+                        for tabla in tablas_trans:
+                            try: execute_sql(ses,f"DELETE FROM {tabla}")
+                            except Exception: pass
+                        if limpiar_bodega:
+                            execute_sql(ses,"DELETE FROM bodega_inventario")
+                            execute_sql(ses,"DELETE FROM bodega_cargas_log")
                         ses.commit()
-                    registrar_auditoria(st.session_state.usuario.get('username'),'DEPURAR_DATOS_PRUEBA','reservas_comensales','','','eliminados','Confirmación DEPURAR'); st.success("Datos de prueba depurados."); st.rerun()
+                    registrar_auditoria(st.session_state.usuario.get('username'),'DEPURAR_DATOS_PRUEBA','sistema','','','base preparada','Respaldo generado previamente; minutas y maestros conservados')
+                    st.success("Base transaccional preparada para producción. Minutas y maestros fueron conservados."); st.rerun()
 
         if modulo_admin == "🛡️ Respaldo":
             st.markdown("#### 🛡️ Respaldo total de emergencia")
@@ -3849,7 +4030,7 @@ def render_login_personal():
             fila=df.iloc[0]
             registrar_evento_login(fila["username"],fila["rol"],"INICIO","OK","Acceso unificado de personal")
             st.session_state.usuario={"username":fila["username"],"rol":fila["rol"],"nombre":fila["nombre"],"correo":fila.get("correo", ""),"debe_cambiar_password":int(fila["debe_cambiar_password"])}
-            st.session_state.portal_actual="administracion" if str(fila["rol"]) in ["AdminTotal","AdminCasino","Operaciones","Gerencia"] else "casino"
+            st.session_state.portal_actual="administracion" if str(fila["rol"]) in ["AdminTotal","AdminCasino","Operaciones","Gerencia","Bodega"] else "casino"
             st.rerun()
 
     with st.expander("🔑 ¿Olvidaste tu contraseña? Recuperar acceso"):
@@ -3983,7 +4164,7 @@ if st.session_state.usuario and render_cambio_password_obligatorio():
 # La navegación es visual/operativa y NO altera la lógica de reservas, DB ni correo.
 if st.session_state.usuario:
     rol_activo = str(st.session_state.usuario.get("rol", ""))
-    st.session_state.portal_actual = "administracion" if rol_activo in ["AdminTotal", "AdminCasino", "Operaciones", "Gerencia"] else "casino"
+    st.session_state.portal_actual = "administracion" if rol_activo in ["AdminTotal", "AdminCasino", "Operaciones", "Gerencia", "Bodega"] else "casino"
 elif st.session_state.rut_actual:
     st.session_state.portal_actual = "comensal"
 

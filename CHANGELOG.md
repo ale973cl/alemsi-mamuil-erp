@@ -1,3 +1,23 @@
+# v2.1.3.35 CANDIDATA PRODUCCION DEMO
+
+- ALEMSI se separa en **ALEMSI Paso Fronterizo** y **ALEMSI Administrativos**.
+- Paso Fronterizo: solo Opción 1 o Hipocalórico; sin selección explícita no existe ración.
+- Administrativos: solo Almuerzo y puede escoger cualquiera de las opciones disponibles del día; sin selección no existe ración.
+- Reservas internas ALEMSI siguen sin cobro y suman exclusivamente las selecciones válidas a Producción.
+- Cocina muestra listado nominal del personal ALEMSI reservado, con grupo, servicio y plato.
+- Inicio de Producción queda protegido contra doble ejecución y descuenta Bodega una sola vez según recetas disponibles.
+- Si un plato no tiene receta, Producción no se bloquea: se registra y se advierte que no hubo descuento automático para ese plato.
+- Si falta stock, la jornada queda registrada y se informa el faltante para ajuste operativo.
+- Coordinadores: consumo valorizado para control financiero, sin cobro; conserva correo de reserva.
+- AdminTotal > Actividad muestra fecha y hora completa con segundos.
+- Coordinación mantiene panel privado y agrega vista de sus días observados/pendientes; no edita Minuta oficial.
+- Bodega reutiliza el mismo módulo administrativo de Minutas, evitando una pantalla paralela.
+- Correo de transferencia reorganiza datos en líneas independientes y bloque listo para copiar/pegar.
+- AdminTotal > Usuarios agrega notificación masiva de acceso sin modificar contraseñas.
+- Depuración de producción exige respaldo generado en la sesión y conserva Minutas/maestros.
+- Respaldo lógico incluye revisión de Coordinación y datos transaccionales adicionales.
+- Compras/OCR/Costos de Cocina permanecen fuera de esta candidata; se activarán junto al módulo completo de Bodega.
+
 # v2.1.3.34 CANDIDATA DEMO COORDINACION
 
 - Nuevo rol Coordinacion por login principal.
