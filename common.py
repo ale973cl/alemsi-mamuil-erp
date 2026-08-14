@@ -257,7 +257,7 @@ def get_minutas_rango(fecha_inicio: str, fecha_fin: str):
             WHERE activo=1 AND fecha BETWEEN :inicio AND :fin
             ORDER BY fecha,
                      CASE servicio WHEN 'Desayuno' THEN 1 WHEN 'Almuerzo' THEN 2 WHEN 'Once' THEN 3 WHEN 'Cena' THEN 4 ELSE 5 END,
-                     CASE tipo_opcion WHEN 'Opción 1' THEN 1 WHEN 'Opción 2' THEN 2 WHEN 'Hipocalórico' THEN 3 ELSE 4 END,
+                     CASE UPPER(REPLACE(tipo_opcion,'Ó','O')) WHEN 'OPCION 1' THEN 1 WHEN 'OPCION 2' THEN 2 WHEN 'OPCION 3' THEN 3 WHEN 'HIPOCALORICO' THEN 4 ELSE 5 END,
                      id
             """,
             params={"inicio": fecha_inicio, "fin": fecha_fin},
@@ -268,45 +268,14 @@ def get_minutas_rango(fecha_inicio: str, fecha_fin: str):
 
 
 def descontar_bodega(plato):
-    """Descuenta insumos por FEFO dentro de una única transacción."""
-    try:
-        conn = get_conn()
-        with conn.session as session:
-            recetas = execute_sql(
-                session,
-                "SELECT insumo, cantidad FROM recetas WHERE plato=%s",
-                (plato,),
-            ).mappings().all()
-            for receta in recetas:
-                pendiente = float(receta["cantidad"] or 0)
-                if pendiente <= 0:
-                    continue
-                lotes = execute_sql(
-                    session,
-                    """
-                    SELECT id, stock
-                    FROM bodega_inventario
-                    WHERE nombre_articulo ILIKE %s AND stock > 0
-                    ORDER BY caduca ASC NULLS LAST, id ASC
-                    FOR UPDATE
-                    """,
-                    (f"%{receta['insumo']}%",),
-                ).mappings().all()
-                for lote in lotes:
-                    if pendiente <= 0:
-                        break
-                    descuento = min(float(lote["stock"] or 0), pendiente)
-                    execute_sql(
-                        session,
-                        "UPDATE bodega_inventario SET stock=GREATEST(stock-%s, 0) WHERE id=%s",
-                        (descuento, lote["id"]),
-                    )
-                    pendiente -= descuento
-            session.commit()
-    except Exception:
-        # El descuento de inventario no debe anular una reserva ya confirmada.
-        return False
-    return True
+    """Compatibilidad histórica: el descuento directo por plato está deshabilitado.
+
+    Regla de oro v36: una reserva nunca mueve stock. El único descuento automático
+    autorizado se ejecuta dentro de "Iniciar jornada" de Producción, donde existe
+    fecha, servicio, cantidad consolidada, minuta vigente, receta aprobada y bloqueo
+    transaccional contra doble ejecución.
+    """
+    return False
 
 def enviar_email(destino, asunto, html, adjuntos=None):
     """Mantiene operación nativa con SMTP Gmail - lee st.secrets [email]"""
@@ -621,6 +590,18 @@ def init_db():
                 )
             """)
             execute_sql(s, """
+                CREATE TABLE IF NOT EXISTS receta_revision_coordinacion (
+                    id SERIAL PRIMARY KEY,
+                    plato TEXT NOT NULL,
+                    version_receta INTEGER,
+                    accion TEXT NOT NULL,
+                    observacion TEXT,
+                    usuario TEXT,
+                    fecha_accion TEXT,
+                    estado TEXT DEFAULT 'Pendiente'
+                )
+            """)
+            execute_sql(s, """
                 CREATE TABLE IF NOT EXISTS migraciones_app (
                     clave TEXT PRIMARY KEY,
                     aplicado_at TEXT
@@ -685,6 +666,7 @@ def init_db():
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS correo TEXT",
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS fecha_creacion TEXT",
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS tipo_registro TEXT DEFAULT 'RESERVA_COMERCIAL'",
+                "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS tipo_opcion TEXT",
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS fecha_modificacion TEXT",
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS modificado_por TEXT",
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS referencia_reserva TEXT",
@@ -702,6 +684,9 @@ def init_db():
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS pago_token TEXT",
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS motivo_estado_pago TEXT",
                 "ALTER TABLE bodega_inventario ADD COLUMN IF NOT EXISTS familia TEXT",
+                "ALTER TABLE platos ADD COLUMN IF NOT EXISTS tipo_plato TEXT",
+                "ALTER TABLE platos ADD COLUMN IF NOT EXISTS proteina_principal TEXT",
+                "ALTER TABLE platos ADD COLUMN IF NOT EXISTS temporada TEXT",
             ]:
                 execute_sql(s, column_sql)
 
@@ -797,6 +782,27 @@ def init_db():
             execute_sql(s, "UPDATE solicitudes SET institucion='ALEMSI Paso Fronterizo' WHERE LOWER(TRIM(COALESCE(institucion,'')))='alemsi'")
             execute_sql(s, "UPDATE instituciones SET activa=0, descripcion='Migrado a ALEMSI Paso Fronterizo' WHERE LOWER(TRIM(nombre))='alemsi'")
 
+            # MIG-36: normaliza las variantes históricas de Opción 1 / Opción 2 / Hipocalórico.
+            # Esto corrige precarga de fechas antiguas, visualización semanal y conteos sin perder minutas.
+            execute_sql(s, """
+                UPDATE minutas SET tipo_opcion = CASE
+                    WHEN UPPER(TRIM(tipo_opcion)) IN ('OPCIÓN 1','OPCION 1','OPCIÓN1','OPCION1') THEN 'OPCION 1'
+                    WHEN UPPER(TRIM(tipo_opcion)) IN ('OPCIÓN 2','OPCION 2','OPCIÓN2','OPCION2') THEN 'OPCION 2'
+                    WHEN UPPER(TRIM(tipo_opcion)) IN ('OPCIÓN 3','OPCION 3','OPCIÓN3','OPCION3') THEN 'OPCION 3'
+                    WHEN UPPER(TRIM(tipo_opcion)) IN ('HIPOCALÓRICO','HIPOCALORICO') THEN 'HIPOCALORICO'
+                    ELSE UPPER(TRIM(tipo_opcion)) END
+                WHERE TRIM(COALESCE(tipo_opcion,''))<>''
+            """)
+            execute_sql(s, """
+                UPDATE solicitudes SET tipo_opcion = CASE
+                    WHEN UPPER(TRIM(tipo_opcion)) IN ('OPCIÓN 1','OPCION 1','OPCIÓN1','OPCION1') THEN 'OPCION 1'
+                    WHEN UPPER(TRIM(tipo_opcion)) IN ('OPCIÓN 2','OPCION 2','OPCIÓN2','OPCION2') THEN 'OPCION 2'
+                    WHEN UPPER(TRIM(tipo_opcion)) IN ('OPCIÓN 3','OPCION 3','OPCIÓN3','OPCION3') THEN 'OPCION 3'
+                    WHEN UPPER(TRIM(tipo_opcion)) IN ('HIPOCALÓRICO','HIPOCALORICO') THEN 'HIPOCALORICO'
+                    ELSE UPPER(TRIM(tipo_opcion)) END
+                WHERE TRIM(COALESCE(tipo_opcion,''))<>''
+            """)
+
             # Regla comercial vigente: base estándar $6.400/día para instituciones cobrables.
             # Las excepciones se conservan en precio_especial + regla_activa.
             execute_sql(s, "UPDATE instituciones SET precio_dia=6400 WHERE (precio_dia IS NULL OR precio_dia<>6400) AND nombre NOT IN ('ALEMSI Paso Fronterizo','ALEMSI Administrativos')")
@@ -810,7 +816,10 @@ def init_db():
                         fecha_menu = fila["fecha"].strip()
                         dia_semana = dias_semana[date.fromisoformat(fecha_menu).weekday()]
                         servicio_menu = fila["servicio"].strip()
-                        tipo_menu = fila["tipo_opcion"].strip()
+                        tipo_menu_raw = fila["tipo_opcion"].strip()
+                        tipo_menu_norm = tipo_menu_raw.upper().replace("Ó","O")
+                        mapa_tipo = {"OPCION 1":"OPCION 1","OPCION1":"OPCION 1","OPCION 2":"OPCION 2","OPCION2":"OPCION 2","OPCION 3":"OPCION 3","OPCION3":"OPCION 3","HIPOCALORICO":"HIPOCALORICO"}
+                        tipo_menu = mapa_tipo.get(tipo_menu_norm, tipo_menu_norm)
                         plato_menu = fila["plato"].strip()
                         existente = execute_sql(
                             s,
@@ -859,6 +868,8 @@ def init_db():
                 "CREATE INDEX IF NOT EXISTS idx_solicitudes_rut ON solicitudes (rut)",
                 "CREATE INDEX IF NOT EXISTS idx_solicitudes_fecha ON solicitudes (fecha)",
                 "CREATE INDEX IF NOT EXISTS idx_solicitudes_estado_pago ON solicitudes (estado_pago)",
+                "CREATE INDEX IF NOT EXISTS idx_solicitudes_rut_fecha_servicio_id ON solicitudes (rut, fecha, servicio, id DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_platos_nombre_servicio ON platos (LOWER(TRIM(nombre)), servicio)",
                 "CREATE INDEX IF NOT EXISTS idx_servicios_produccion_fecha_servicio ON servicios_produccion (fecha, servicio)",
             ]:
                 execute_sql(s, index_sql)

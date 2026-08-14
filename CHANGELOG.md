@@ -1,3 +1,29 @@
+# v2.1.3.37 — Coordinación, permisos y calidad
+
+- Coordinación incorpora revisión de Recetas (Aprobar/Observar) sin modificar la receta oficial.
+- Reporte consolidado de observaciones de recetas para Cocina/Administración.
+- Satisfacción, comentarios y reclamos quedan disponibles mediante permisos independientes.
+- Catálogo de permisos de AdminTotal ampliado para módulos administrativos.
+- Depuración reforzada: conserva Usuarios/contraseñas, permisos, Minutas, Platos, Recetas, Instituciones y configuración.
+
+# v2.1.3.36 CANDIDATA CIERRE OPERATIVO
+
+- Auditoría estática/estructural completa del código antes de la prueba real.
+- Nuevo **Maestro de Platos** visible y reutilizable desde Minutas, con búsqueda, filtros, descarga CSV y alta/clasificación básica.
+- Sincronización idempotente: platos históricos de `minutas` pasan al maestro sin alterar costos ni recetas.
+- Normalización de variantes históricas `Opción 1 / Opción 2 / Hipocalórico` para corregir precarga de fechas antiguas, visualización y edición.
+- Producción usa una sola fuente de conteo y deduplica por **RUT + fecha + servicio**, tomando el registro más reciente.
+- Reportes reutilizan el mismo conteo de Producción por servicio/plato y agregan listado nominal ALEMSI para control de entrega.
+- Selección ALEMSI conserva `tipo_opcion` en la reserva interna para trazabilidad de Opción 1 / Hipocalórico.
+- Regla de Bodega reforzada: reserva no mueve stock; solo `Iniciar jornada` puede descontar, una vez.
+- Eventualidad sin minuta: se registra Producción pero **no** se descuenta Bodega automáticamente.
+- Recetas en BORRADOR ya no descuentan inventario; solo recetas ACTIVA/APROBADA.
+- Helper histórico `descontar_bodega()` queda neutralizado para impedir descuentos fuera de Producción.
+- Actividad AdminTotal mantiene fecha y hora completa.
+- Coordinación mantiene acceso privado de solo revisión: ver, aprobar, observar y proponer cambio; no edita minuta oficial.
+- Finanzas conserva ruta Observado/Rechazado -> notificación -> misma referencia -> nuevo comprobante.
+- Compras/OCR/Costos de Cocina continúan fuera de esta candidata y no bloquean el demo.
+
 # v2.1.3.35 CANDIDATA PRODUCCION DEMO
 
 - ALEMSI se separa en **ALEMSI Paso Fronterizo** y **ALEMSI Administrativos**.

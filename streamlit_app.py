@@ -1,4 +1,4 @@
-# ALEMSI v2.1.3.35_CANDIDATA_PRODUCCION_DEMO - cierre incremental para demo/pruebas reales
+# ALEMSI v2.1.3.37_CANDIDATA_CIERRE_PERMISOS - cierre incremental, Coordinación y maestro de permisos
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime
@@ -252,7 +252,7 @@ BACKUP_TABLES = [
     "excepciones_personas", "modalidades_pago", "usuarios", "usuarios_permisos",
     "auditoria_acciones", "registro_login", "configuracion_correos", "configuracion_bancaria",
     "reclamos_sugerencias", "encuestas_satisfaccion", "tareas_inventario_cocina",
-    "inventarios_aleatorios", "minuta_revision_coordinacion"
+    "inventarios_aleatorios", "minuta_revision_coordinacion", "receta_revision_coordinacion"
 ]
 
 def generar_respaldo_logico(tipo="MANUAL"):
@@ -261,7 +261,7 @@ def generar_respaldo_logico(tipo="MANUAL"):
     sello = datetime.now().strftime("%Y%m%d_%H%M%S")
     meta = {
         "sistema": "ALEMSI Mamuil Malal",
-        "version": "v2.1.3.33",
+        "version": "v2.1.3.37",
         "fecha_hora": datetime.now().isoformat(),
         "tipo": tipo,
         "tablas": [],
@@ -392,16 +392,38 @@ def notificar_ingreso_usuario(correo, nombre, username, rol):
     return enviar_email(str(correo).strip().lower(), "Recordatorio de acceso · ALEMSI Mamuil Malal", html)
 
 PERMISOS_DISPONIBLES = {
-    "ver_cocina": "Cocina",
+    # Operación por perfil
+    "ver_cocina": "Cocina · operar producción",
     "ver_bodega": "Bodega / inventario",
-    "cargar_inventario": "Cargar inventario",
+    "cargar_inventario": "Bodega · cargar / ajustar inventario",
     "ver_finanzas": "Finanzas",
-    "modificar_montos": "Modificar montos",
-    "validar_pagos": "Validar pagos",
-    "ver_gerencia": "Reportes de Gerencia",
-    "editar_minuta": "Editar minutas",
-    "gestionar_usuarios": "Gestionar usuarios",
-    "gestionar_datos_transferencia": "Gestionar datos de transferencia",
+    "modificar_montos": "Finanzas · modificar montos",
+    "validar_pagos": "Finanzas · validar comprobantes",
+    "ver_gerencia": "Gerencia / control de gestión",
+
+    # Módulos administrativos visibles desde el maestro
+    "ver_dashboard": "Administración · Dashboard",
+    "ver_reportes": "Administración · Reportes",
+    "ver_planilla_reservas": "Administración · Planilla de Reservas",
+    "editar_minuta": "Administración · Minutas / Maestro de Platos",
+    "gestionar_excepciones": "Administración · Excepciones",
+    "gestionar_instituciones": "Administración · Instituciones",
+    "gestionar_modalidades_pago": "Administración · Modalidades de pago",
+    "gestionar_correos": "Administración · Correos",
+    "gestionar_datos_transferencia": "Administración · Datos de transferencia",
+    "gestionar_usuarios": "AdminTotal · Usuarios y permisos",
+    "ver_actividad": "AdminTotal · Registro de actividad",
+    "depurar_datos": "AdminTotal · Depuración de datos de prueba",
+    "generar_respaldos": "AdminTotal · Respaldos",
+
+    # Calidad / satisfacción
+    "ver_satisfaccion": "Calidad · Dashboard de satisfacción",
+    "ver_comentarios_satisfaccion": "Calidad · Comentarios de encuestas",
+    "ver_reclamos": "Calidad · Reclamos / sugerencias / felicitaciones",
+
+    # Coordinación: acceso deliberadamente limitado
+    "coord_revisar_minutas": "Coordinación · Revisar / aprobar Minutas",
+    "coord_revisar_recetas": "Coordinación · Revisar / aprobar Recetas",
 }
 
 def _render_encuestas_portal(conn, token, referencia, rut, institucion):
@@ -453,6 +475,46 @@ def _render_encuestas_portal(conn, token, referencia, rut, institucion):
                     ses.commit()
                 st.success("Gracias por ayudarnos a mejorar la APP ALEMSI.")
                 st.rerun()
+
+
+def _render_satisfaccion_gestion(usuario, key_prefix="sat"):
+    """Vista reutilizable de calidad. Promedios primero; comentarios solo con permiso explícito."""
+    conn=get_conn()
+    st.markdown("### ⭐ Calidad y satisfacción")
+    df=conn.query("""
+        SELECT tipo,institucion,puntaje_general,puntaje_comida,puntaje_atencion,
+               puntaje_limpieza,puntaje_variedad,puntaje_facilidad,puntaje_claridad,
+               comentario,fecha_respuesta
+        FROM encuestas_satisfaccion
+        ORDER BY fecha_respuesta DESC
+    """,ttl=0)
+    if df.empty:
+        st.info("Todavía no existen evaluaciones registradas.")
+    else:
+        total=len(df)
+        general=pd.to_numeric(df["puntaje_general"],errors="coerce").mean()
+        casino=df[df["tipo"].astype(str)=="CASINO"]
+        app_df=df[df["tipo"].astype(str)=="APP"]
+        c1,c2,c3=st.columns(3)
+        c1.metric("Evaluaciones",total)
+        c2.metric("Promedio general",f"{general:.2f} / 5" if pd.notna(general) else "—")
+        c3.metric("Casino / APP",f"{len(casino)} / {len(app_df)}")
+        resumen=(df.groupby("tipo",dropna=False).agg(
+            Respuestas=("tipo","size"),
+            Promedio=("puntaje_general",lambda s: pd.to_numeric(s,errors="coerce").mean())
+        ).reset_index())
+        resumen["Promedio"]=resumen["Promedio"].round(2)
+        st.dataframe(resumen.rename(columns={"tipo":"Tipo"}),use_container_width=True,hide_index=True)
+        if permiso_habilitado(usuario.get("username"),"ver_comentarios_satisfaccion",False) or usuario.get("rol")=="AdminTotal":
+            comentarios=df[df["comentario"].fillna("").astype(str).str.strip()!=""].copy()
+            if not comentarios.empty:
+                with st.expander(f"💬 Comentarios de encuestas · {len(comentarios)}"):
+                    st.dataframe(_tabla_visible(comentarios,{"fecha_respuesta":"Fecha / hora","tipo":"Tipo","institucion":"Institución","puntaje_general":"Puntaje","comentario":"Comentario"},["fecha_respuesta"]),use_container_width=True,hide_index=True)
+    if permiso_habilitado(usuario.get("username"),"ver_reclamos",False) or usuario.get("rol")=="AdminTotal":
+        rec=conn.query("SELECT fecha,nombre,tipo,categoria,mensaje,estado FROM reclamos_sugerencias ORDER BY fecha DESC",ttl=0)
+        st.markdown("#### 🗣️ Reclamos, sugerencias y felicitaciones")
+        if rec.empty: st.caption("Sin registros.")
+        else: st.dataframe(_tabla_visible(rec,{"fecha":"Fecha / hora","nombre":"Comensal","tipo":"Tipo","categoria":"Categoría","mensaje":"Mensaje","estado":"Estado"},["fecha"]),use_container_width=True,hide_index=True)
 
 
 st.set_page_config(page_title="Mamuil Malal · Reserva de Alimentación", page_icon="🍽️", layout="wide", initial_sidebar_state="collapsed")
@@ -1591,16 +1653,16 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                                 raise ValueError(f"{servicio} del {date.fromisoformat(f_iso).strftime('%d/%m/%Y')} ya no puede modificarse porque faltan menos de 48 horas.")
                                             execute_sql(
                                                 sesion,
-                                                "UPDATE solicitudes SET plato=%s,plato_reservado=%s,precio=%s,precio_aplicado=%s,institucion=%s,correo=%s,metodo_pago=%s,estado_pago=%s,estado_consumo=%s,fecha_modificacion=%s,modificado_por=%s,referencia_reserva=%s,tipo_registro=%s WHERE id=%s",
-                                                (plato, plato, 0, 0, institucion, correo_cli, "Interno ALEMSI", "No aplica", estado_bd, ahora_iso, rut, referencia_reserva, "CONSUMO_INTERNO", existente["id"]),
+                                                "UPDATE solicitudes SET plato=%s,plato_reservado=%s,tipo_opcion=%s,precio=%s,precio_aplicado=%s,institucion=%s,correo=%s,metodo_pago=%s,estado_pago=%s,estado_consumo=%s,fecha_modificacion=%s,modificado_por=%s,referencia_reserva=%s,tipo_registro=%s WHERE id=%s",
+                                                (plato, plato, tipo_opcion_int, 0, 0, institucion, correo_cli, "Interno ALEMSI", "No aplica", estado_bd, ahora_iso, rut, referencia_reserva, "CONSUMO_INTERNO", existente["id"]),
                                             )
                                         else:
                                             execute_sql(
                                                 sesion,
                                                 "INSERT INTO solicitudes "
-                                                "(rut,fecha,servicio,plato,plato_reservado,codigo,precio,precio_aplicado,institucion,correo,metodo_pago,estado_pago,estado_consumo,fecha_creacion,fecha_modificacion,modificado_por,referencia_reserva,tipo_registro) "
-                                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                                                (rut, f_iso, servicio, plato, plato, None, 0, 0, institucion, correo_cli, "Interno ALEMSI", "No aplica", estado_bd, ahora_iso, ahora_iso, rut, referencia_reserva, "CONSUMO_INTERNO"),
+                                                "(rut,fecha,servicio,plato,plato_reservado,tipo_opcion,codigo,precio,precio_aplicado,institucion,correo,metodo_pago,estado_pago,estado_consumo,fecha_creacion,fecha_modificacion,modificado_por,referencia_reserva,tipo_registro) "
+                                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                                                (rut, f_iso, servicio, plato, plato, tipo_opcion_int, None, 0, 0, institucion, correo_cli, "Interno ALEMSI", "No aplica", estado_bd, ahora_iso, ahora_iso, rut, referencia_reserva, "CONSUMO_INTERNO"),
                                             )
                                 else:
                                     precio_por_linea = {}
@@ -1866,6 +1928,13 @@ def _asegurar_revision_coordinacion():
                 fecha_accion TEXT, estado TEXT DEFAULT 'Pendiente'
             )
         """)
+        execute_sql(ses, """
+            CREATE TABLE IF NOT EXISTS receta_revision_coordinacion (
+                id SERIAL PRIMARY KEY, plato TEXT NOT NULL, version_receta INTEGER,
+                accion TEXT NOT NULL, observacion TEXT, usuario TEXT,
+                fecha_accion TEXT, estado TEXT DEFAULT 'Pendiente'
+            )
+        """)
         ses.commit()
 
 
@@ -1874,8 +1943,9 @@ def _sincronizar_maestro_platos():
     conn = get_conn()
     with conn.session as ses:
         execute_sql(ses, """
-            INSERT INTO platos (nombre,servicio,valor,activo,descripcion)
-            SELECT DISTINCT TRIM(m.plato), m.servicio, 0, 1, 'Importado desde minuta histórica'
+            INSERT INTO platos (nombre,servicio,valor,activo,descripcion,tipo_plato)
+            SELECT DISTINCT TRIM(m.plato), m.servicio, 0, 1, 'Importado desde minuta histórica',
+                   CASE WHEN UPPER(TRIM(COALESCE(m.tipo_opcion,'')))='HIPOCALORICO' THEN 'Hipocalórico' ELSE NULL END
             FROM minutas m
             WHERE COALESCE(m.activo,1)=1 AND TRIM(COALESCE(m.plato,''))<>''
               AND NOT EXISTS (
@@ -1905,11 +1975,138 @@ def _alertas_preventivas_minuta(df):
     return alertas
 
 
+def _cargar_demanda_produccion_fecha(fecha_iso):
+    """Fuente única de verdad para conteo operativo por fecha.
+
+    Deduplica por RUT+fecha+servicio tomando el registro más reciente, evitando
+    que una corrección o reintento histórico sume una segunda ración.
+    """
+    conn = get_conn()
+    df_prod = conn.query(
+        """
+        WITH base AS (
+            SELECT DISTINCT ON (s.rut,s.fecha,s.servicio)
+                   s.id,s.rut,s.fecha,s.servicio,s.institucion,s.tipo_registro,s.estado_consumo,
+                   COALESCE(s.plato_reservado,s.plato) AS plato,
+                   COALESCE(NULLIF(TRIM(s.tipo_opcion),''),
+                       (SELECT m.tipo_opcion FROM minutas m
+                        WHERE m.fecha=s.fecha AND m.servicio=s.servicio AND m.activo=1
+                          AND UPPER(TRIM(m.plato))=UPPER(TRIM(COALESCE(s.plato_reservado,s.plato)))
+                        ORDER BY m.id DESC LIMIT 1), '') AS tipo_opcion
+            FROM solicitudes s
+            WHERE s.fecha=:fecha
+              AND (COALESCE(s.tipo_registro,'RESERVA_COMERCIAL') <> 'CONSUMO_INTERNO'
+                   OR s.estado_consumo='Consumirá')
+            ORDER BY s.rut,s.fecha,s.servicio,s.id DESC
+        )
+        SELECT servicio,tipo_opcion,plato,COUNT(*) AS reservadas
+        FROM base
+        GROUP BY servicio,tipo_opcion,plato
+        ORDER BY CASE servicio WHEN 'Desayuno' THEN 1 WHEN 'Almuerzo' THEN 2 WHEN 'Once' THEN 3 WHEN 'Cena' THEN 4 ELSE 5 END,
+                 tipo_opcion,plato
+        """, params={"fecha":fecha_iso}, ttl=0
+    )
+    df_alemsi = conn.query(
+        """
+        WITH base AS (
+            SELECT DISTINCT ON (s.rut,s.fecha,s.servicio)
+                   s.id,s.rut,s.fecha,s.servicio,s.institucion,s.estado_consumo,
+                   COALESCE(s.plato_reservado,s.plato) AS plato,
+                   COALESCE(NULLIF(TRIM(s.tipo_opcion),''),
+                       (SELECT m.tipo_opcion FROM minutas m
+                        WHERE m.fecha=s.fecha AND m.servicio=s.servicio AND m.activo=1
+                          AND UPPER(TRIM(m.plato))=UPPER(TRIM(COALESCE(s.plato_reservado,s.plato)))
+                        ORDER BY m.id DESC LIMIT 1), '') AS tipo_opcion
+            FROM solicitudes s
+            WHERE s.fecha=:fecha AND COALESCE(s.tipo_registro,'')='CONSUMO_INTERNO'
+              AND s.estado_consumo='Consumirá'
+            ORDER BY s.rut,s.fecha,s.servicio,s.id DESC
+        )
+        SELECT COALESCE(c.nombre,base.rut) AS nombre,base.rut,base.institucion,base.servicio,base.tipo_opcion,base.plato
+        FROM base LEFT JOIN comensales c ON c.rut=base.rut
+        ORDER BY base.institucion,nombre,base.servicio
+        """, params={"fecha":fecha_iso}, ttl=0
+    )
+    return df_prod, df_alemsi
+
+
+def _render_reporte_produccion_fecha(fecha_iso, titulo=True, mostrar_nominal=True):
+    """Reporte reutilizable por Cocina, Administración, Gerencia y AdminTotal."""
+    df_prod, df_alemsi = _cargar_demanda_produccion_fecha(fecha_iso)
+    if titulo:
+        st.markdown(f"#### 🍽️ Producción reservada · {date.fromisoformat(fecha_iso).strftime('%d/%m/%Y')}")
+    if df_prod.empty:
+        st.info("No hay raciones válidas registradas para esta fecha.")
+        return df_prod, df_alemsi
+    total=0
+    for servicio in ["Desayuno","Almuerzo","Once","Cena"]:
+        g=df_prod[df_prod["servicio"].astype(str)==servicio].copy()
+        if g.empty: continue
+        subtotal=int(g["reservadas"].sum()); total += subtotal
+        st.markdown(f"**{servicio} · {subtotal} raciones**")
+        g["Opción"] = g["tipo_opcion"].replace({"OPCION 1":"1","OPCION 2":"2","OPCION 3":"3","HIPOCALORICO":"Hipocalórico","":"—"})
+        st.dataframe(g[["Opción","plato","reservadas"]].rename(columns={"plato":"Plato","reservadas":"Cantidad"}),use_container_width=True,hide_index=True)
+    st.metric("TOTAL RACIONES DEL DÍA", total)
+    if mostrar_nominal and not df_alemsi.empty:
+        nominal=df_alemsi.copy()
+        nominal["Entrega"]="☐"
+        st.markdown("##### 👥 Personal ALEMSI · control de entrega")
+        st.dataframe(nominal[["Entrega","nombre","rut","institucion","servicio","tipo_opcion","plato"]].rename(columns={
+            "nombre":"Nombre","rut":"RUT","institucion":"Grupo","servicio":"Servicio",
+            "tipo_opcion":"Opción","plato":"Plato reservado"}),use_container_width=True,hide_index=True)
+        st.download_button("⬇️ Descargar listado ALEMSI CSV",nominal.to_csv(index=False).encode("utf-8"),f"alemsi_entrega_{fecha_iso}.csv","text/csv",key=f"csv_alemsi_{fecha_iso}")
+    return df_prod, df_alemsi
+
+
 def render_coordinacion():
     _asegurar_revision_coordinacion(); _sincronizar_maestro_platos()
     conn=get_conn(); usuario=st.session_state.usuario
-    st.markdown("### 🤝 Coordinación · Revisión de Minutas")
-    st.caption("Acceso privado: visualizar, aprobar, observar o proponer cambios. La minuta oficial solo la modifica ALEMSI.")
+    st.markdown("### 🤝 Coordinación")
+    st.caption("Acceso privado de revisión. Coordinación no modifica directamente Minutas ni Recetas oficiales.")
+    vistas=[]
+    if permiso_habilitado(usuario.get("username"),"coord_revisar_minutas",True): vistas.append("🍽️ Revisar Minutas")
+    if permiso_habilitado(usuario.get("username"),"coord_revisar_recetas",True): vistas.append("📖 Revisar Recetas")
+    if permiso_habilitado(usuario.get("username"),"ver_satisfaccion",False): vistas.append("⭐ Satisfacción")
+    if not vistas:
+        st.warning("Tu perfil no tiene funciones de Coordinación habilitadas. Contacta a AdminTotal."); return
+    vista=st.radio("Función",vistas,horizontal=True,key="coord_vista",label_visibility="collapsed")
+    if vista=="⭐ Satisfacción":
+        _render_satisfaccion_gestion(usuario,key_prefix="coord_sat"); return
+    if vista=="📖 Revisar Recetas":
+        st.markdown("#### 📖 Revisión de Recetas")
+        recetas=conn.query("""
+            SELECT plato,MAX(COALESCE(version,1)) AS version_receta,
+                   MAX(COALESCE(estado,'BORRADOR')) AS estado_receta
+            FROM recetas WHERE TRIM(COALESCE(plato,''))<>''
+            GROUP BY plato ORDER BY plato
+        """,ttl=0)
+        if recetas.empty:
+            st.info("No existen recetas cargadas para revisar."); return
+        hist_r=conn.query("SELECT plato,version_receta,accion,observacion,fecha_accion,estado FROM receta_revision_coordinacion WHERE usuario=:u ORDER BY fecha_accion DESC,id DESC",params={"u":str(usuario.get("username"))},ttl=0)
+        if not hist_r.empty:
+            pend_r=hist_r[hist_r["accion"].astype(str)=="OBSERVAR"].copy()
+            if not pend_r.empty:
+                with st.expander(f"📝 Mis recetas observadas · {len(pend_r)}",expanded=True):
+                    st.dataframe(_tabla_visible(pend_r,{"plato":"Plato","version_receta":"Versión","accion":"Acción","observacion":"Observación","fecha_accion":"Fecha / hora","estado":"Estado"},["fecha_accion"]),use_container_width=True,hide_index=True)
+        plato_r=st.selectbox("Plato / receta",recetas["plato"].astype(str).tolist(),key="coord_receta_plato")
+        cab=recetas[recetas["plato"].astype(str)==plato_r].iloc[0]
+        det=conn.query("SELECT insumo,cantidad,unidad,instrucciones,estado,version,merma_pct,margen_produccion_pct FROM recetas WHERE plato=:p ORDER BY insumo",params={"p":plato_r},ttl=0)
+        st.caption(f"Versión {int(cab['version_receta'] or 1)} · Estado receta: {cab['estado_receta']}")
+        st.dataframe(det.rename(columns={"insumo":"Insumo","cantidad":"Cantidad","unidad":"Unidad","instrucciones":"Instrucciones","estado":"Estado","version":"Versión","merma_pct":"Merma %","margen_produccion_pct":"Margen producción %"}),use_container_width=True,hide_index=True)
+        accion_r=st.radio("Decisión",["APROBAR","OBSERVAR"],horizontal=True,key="coord_receta_accion")
+        obs_r=st.text_area("Comentario / observación",key="coord_receta_obs",placeholder="Si observas la receta, indica exactamente qué debe revisarse.")
+        if st.button("Guardar revisión de receta",type="primary",use_container_width=True,key="coord_receta_guardar"):
+            if accion_r=="OBSERVAR" and not obs_r.strip():
+                st.error("La observación es obligatoria cuando la receta no se aprueba.")
+            else:
+                with conn.session as ses:
+                    execute_sql(ses,"INSERT INTO receta_revision_coordinacion (plato,version_receta,accion,observacion,usuario,fecha_accion,estado) VALUES (%s,%s,%s,%s,%s,%s,%s)",(plato_r,int(cab['version_receta'] or 1),accion_r,obs_r.strip(),str(usuario.get('username')),datetime.now().isoformat(),'Aprobado' if accion_r=='APROBAR' else 'Pendiente'))
+                    ses.commit()
+                registrar_auditoria(usuario.get('username'),'REVISION_RECETA_COORDINACION','recetas',plato_r,str(cab['estado_receta']),accion_r,obs_r.strip())
+                st.success("Revisión registrada. La receta oficial no fue modificada."); st.rerun()
+        return
+    st.markdown("#### 🍽️ Revisión de Minutas")
+    st.caption("Puedes recorrer el mes completo o elegir un día. Aprobar, observar o proponer cambio no modifica la minuta oficial.")
     mes=st.date_input("Mes a revisar", value=date.today().replace(day=1), key="coord_mes")
     ini=mes.replace(day=1); fin=(ini+timedelta(days=32)).replace(day=1)-timedelta(days=1)
     df=conn.query("SELECT fecha,servicio,tipo_opcion,plato FROM minutas WHERE activo=1 AND fecha>=:i AND fecha<=:f ORDER BY fecha,servicio,tipo_opcion",params={"i":ini.isoformat(),"f":fin.isoformat()},ttl=0)
@@ -1989,7 +2186,7 @@ def render_casino():
     roles_casino = ["Cocina", "Finanzas", "Bodega", "Coordinacion"]
     if usuario and usuario.get("rol") in roles_casino:
         rol = str(usuario["rol"])
-        st.markdown(f'<div class="al-card"><h3>{rol}</h3><p>¡Buen día, {usuario.get("nombre") or "equipo"}! Hoy es {datetime.now().strftime("%d/%m/%Y")}. Que tengan una excelente jornada.</p></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="al-card"><h3>{"Coordinación" if rol=="Coordinacion" else rol}</h3><p>¡Buen día, {usuario.get("nombre") or "equipo"}! Hoy es {datetime.now().strftime("%d/%m/%Y")}. Que tengan una excelente jornada.</p></div>', unsafe_allow_html=True)
 
         if rol == "Coordinacion":
             render_coordinacion()
@@ -1998,6 +2195,15 @@ def render_casino():
             if not permiso_habilitado(usuario.get('username'),'ver_cocina',True):
                 st.warning('Tu función Cocina está deshabilitada por el Administrador Total.')
                 return
+            # COORD-REC-37: reporte consolidado, sin hilos de correo ni modificación automática.
+            try:
+                obs_coord=get_conn().query("SELECT plato,version_receta,accion,observacion,usuario,fecha_accion,estado FROM receta_revision_coordinacion WHERE accion='OBSERVAR' ORDER BY fecha_accion DESC,id DESC",ttl=0)
+                if not obs_coord.empty:
+                    with st.expander(f"🤝 Observaciones de Coordinación sobre Recetas · {len(obs_coord)}",expanded=False):
+                        st.dataframe(_tabla_visible(obs_coord,{"plato":"Plato","version_receta":"Versión","accion":"Acción","observacion":"Observación","usuario":"Coordinación","fecha_accion":"Fecha / hora","estado":"Estado"},["fecha_accion"]),use_container_width=True,hide_index=True)
+                        st.download_button("⬇️ Descargar observaciones de recetas CSV",obs_coord.to_csv(index=False).encode("utf-8"),"observaciones_recetas_coordinacion.csv","text/csv",use_container_width=True,key="csv_obs_coord_recetas")
+            except Exception:
+                pass
             # INV-TAREA-01: bandeja de tareas ordenadas por Admin_Casino.
             conn_tareas = get_conn()
             df_tareas_cocina = conn_tareas.query(
@@ -2145,31 +2351,7 @@ def render_casino():
                 fecha_j = st.date_input("Día de producción", value=date.today(), key="fecha_jornada_cocina")
                 fecha_iso = fecha_j.isoformat()
                 conn = get_conn()
-                df_prod = conn.query(
-                    """
-                    SELECT s.servicio,
-                           COALESCE(m.tipo_opcion,'') AS tipo_opcion,
-                           COALESCE(s.plato_reservado,s.plato) AS plato,
-                           COUNT(*) AS reservadas
-                    FROM solicitudes s
-                    LEFT JOIN minutas m ON m.fecha=s.fecha AND m.servicio=s.servicio AND UPPER(m.plato)=UPPER(COALESCE(s.plato_reservado,s.plato)) AND m.activo=1
-                    WHERE s.fecha=:fecha
-                      AND (COALESCE(s.tipo_registro,'RESERVA_COMERCIAL') <> 'CONSUMO_INTERNO' OR s.estado_consumo='Consumirá')
-                    GROUP BY s.servicio, COALESCE(m.tipo_opcion,''), COALESCE(s.plato_reservado,s.plato)
-                    ORDER BY CASE s.servicio WHEN 'Desayuno' THEN 1 WHEN 'Almuerzo' THEN 2 WHEN 'Once' THEN 3 WHEN 'Cena' THEN 4 ELSE 5 END,
-                             COALESCE(m.tipo_opcion,''), COALESCE(s.plato_reservado,s.plato)
-                    """, params={"fecha":fecha_iso}, ttl=10)
-
-                df_alemsi_personas = conn.query(
-                    """
-                    SELECT c.nombre,s.rut,s.institucion,s.servicio,COALESCE(s.plato_reservado,s.plato) AS plato
-                    FROM solicitudes s
-                    LEFT JOIN comensales c ON c.rut=s.rut
-                    WHERE s.fecha=:fecha AND COALESCE(s.tipo_registro,'')='CONSUMO_INTERNO'
-                      AND s.estado_consumo='Consumirá'
-                    ORDER BY s.institucion,c.nombre,s.servicio
-                    """, params={"fecha":fecha_iso}, ttl=10
-                )
+                df_prod, df_alemsi_personas = _cargar_demanda_produccion_fecha(fecha_iso)
 
                 estado_j = conn.query("SELECT * FROM jornadas_produccion WHERE fecha=:f", params={"f":fecha_iso}, ttl=0)
                 estado = str(estado_j.iloc[0]["estado"]) if not estado_j.empty else "Pendiente"
@@ -2203,12 +2385,13 @@ def render_casino():
                 if st.button("👁️ Visualizar jornada completa", use_container_width=True):
                     st.session_state["ver_jornada"] = fecha_iso
                 if st.session_state.get("ver_jornada") == fecha_iso:
-                    mostrar_bloques(df_prod)
+                    _render_reporte_produccion_fecha(fecha_iso, titulo=False, mostrar_nominal=True)
 
                 if estado == "Pendiente":
                     confirmar = st.checkbox(f"Confirmo iniciar la jornada completa del {fecha_j.strftime('%d/%m/%Y')}", key=f"conf_ini_j_{fecha_iso}")
                     if st.button("▶️ INICIAR JORNADA", type="primary", use_container_width=True, disabled=not confirmar):
                         sin_receta = []
+                        sin_minuta = []
                         faltantes_stock = []
                         ya_iniciada = False
                         with conn.session as ses:
@@ -2224,7 +2407,22 @@ def render_casino():
                                     porciones = int(r['reservadas'])
                                     execute_sql(ses, "INSERT INTO jornada_detalle (fecha,servicio,tipo_opcion,plato,reservadas,producidas,entregadas) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (fecha,servicio,tipo_opcion,plato) DO UPDATE SET reservadas=EXCLUDED.reservadas", (fecha_iso,str(r['servicio']),str(r['tipo_opcion']),plato_prod,porciones,porciones,0))
 
-                                    recetas = execute_sql(ses, "SELECT insumo,cantidad FROM recetas WHERE LOWER(TRIM(plato))=LOWER(TRIM(%s)) AND COALESCE(estado,'BORRADOR') IN ('ACTIVA','ACTIVO','APROBADA','APROBADO','BORRADOR')", (plato_prod,)).mappings().all()
+                                    minuta_activa = execute_sql(
+                                        ses,
+                                        "SELECT id FROM minutas WHERE fecha=%s AND servicio=%s AND activo=1 AND LOWER(TRIM(plato))=LOWER(TRIM(%s)) LIMIT 1",
+                                        (fecha_iso,str(r['servicio']),plato_prod),
+                                    ).first()
+                                    if not minuta_activa:
+                                        # Regla de oro: una eventualidad sin minuta se produce y registra,
+                                        # pero no genera un descuento automático de inventario.
+                                        sin_minuta.append(plato_prod)
+                                        continue
+                                    recetas = execute_sql(
+                                        ses,
+                                        "SELECT insumo,cantidad FROM recetas WHERE LOWER(TRIM(plato))=LOWER(TRIM(%s)) "
+                                        "AND UPPER(TRIM(COALESCE(estado,''))) IN ('ACTIVA','ACTIVO','APROBADA','APROBADO')",
+                                        (plato_prod,),
+                                    ).mappings().all()
                                     if not recetas:
                                         sin_receta.append(plato_prod)
                                         continue
@@ -2247,14 +2445,18 @@ def render_casino():
                             st.warning("La jornada ya había sido iniciada. No se realizó un segundo descuento de Bodega.")
                         else:
                             detalle_alerta = []
+                            if sin_minuta:
+                                detalle_alerta.append("sin minuta: " + ", ".join(sorted(set(sin_minuta))))
                             if sin_receta:
-                                detalle_alerta.append("sin receta: " + ", ".join(sorted(set(sin_receta))))
+                                detalle_alerta.append("sin receta aprobada: " + ", ".join(sorted(set(sin_receta))))
                             if faltantes_stock:
                                 detalle_alerta.append("stock insuficiente: " + ", ".join(sorted(set(faltantes_stock))))
                             registrar_auditoria(usuario.get('username'),'INICIAR_JORNADA','jornadas_produccion',fecha_iso,'Pendiente','En producción','; '.join(detalle_alerta))
                             st.success("Jornada iniciada. Se congeló la producción y se descontó Bodega según las recetas disponibles, una sola vez.")
+                            if sin_minuta:
+                                st.warning("Producción registrada sin descuento de Bodega porque no existe minuta vigente para: " + ", ".join(sorted(set(sin_minuta))))
                             if sin_receta:
-                                st.warning("Producción registrada sin descuento automático para platos sin receta: " + ", ".join(sorted(set(sin_receta))))
+                                st.warning("Producción registrada sin descuento automático porque falta una receta aprobada para: " + ", ".join(sorted(set(sin_receta))))
                             if faltantes_stock:
                                 st.warning("La producción quedó registrada, pero hubo faltantes de stock para: " + ", ".join(sorted(set(faltantes_stock))))
                         st.rerun()
@@ -2418,6 +2620,8 @@ def render_casino():
             opciones_finanzas = ["📊 Dashboard", "📋 Resumen", "🏢 Por institución", "🧾 Validar comprobantes"]
             if permiso_habilitado(usuario.get("username"), "gestionar_datos_transferencia", True):
                 opciones_finanzas.append("🏦 Datos de transferencia")
+            if permiso_habilitado(usuario.get("username"), "ver_satisfaccion", False):
+                opciones_finanzas.append("⭐ Satisfacción")
             vista_finanzas = st.radio(
                 "Sección Finanzas", opciones_finanzas,
                 horizontal=True, key="vista_finanzas_activa", label_visibility="collapsed",
@@ -2426,6 +2630,9 @@ def render_casino():
 
             if vista_finanzas == "🏦 Datos de transferencia":
                 _render_datos_transferencia(usuario, key_prefix="finanzas_datos_transferencia")
+                return
+            if vista_finanzas == "⭐ Satisfacción":
+                _render_satisfaccion_gestion(usuario,key_prefix="fin_sat")
                 return
 
             df_reservas = _cargar_reservas_finanzas()
@@ -2996,16 +3203,35 @@ def render_admin():
     if st.session_state.usuario and st.session_state.usuario["rol"] in ["AdminTotal","AdminCasino","Operaciones","Gerencia","Bodega"]:
         st.markdown(f'<div class="al-card"><h3>🏢 Administración y Control de Gestión</h3><p>Información consolidada para la gestión operativa y financiera.</p></div>', unsafe_allow_html=True)
         rol_admin = str(st.session_state.usuario.get("rol", ""))
+        usuario_admin = st.session_state.usuario.get("username")
+        mapa_modulos = [
+            ("📈 Dashboard","ver_dashboard",True),
+            ("📊 Reportes","ver_reportes",True),
+            ("📋 Planilla de Reservas","ver_planilla_reservas",True),
+            ("📦 Inventario y Bodega","ver_bodega",True),
+            ("🍽️ Minutas","editar_minuta",True),
+            ("⭐ Satisfacción","ver_satisfaccion",False),
+            ("⚖️ Excepciones","gestionar_excepciones",True),
+            ("🏢 Instituciones","gestionar_instituciones",True),
+            ("💳 Modalidades de Pago","gestionar_modalidades_pago",True),
+            ("📧 Correos","gestionar_correos",True),
+        ]
         if rol_admin == "Bodega":
-            # PERF-35: Bodega reutiliza exactamente la misma gestión de Minutas; no se mantiene una copia paralela.
-            modulos_admin = ["📦 Inventario y Bodega","🍽️ Minutas"]
-        else:
-            modulos_admin = ["📈 Dashboard","📊 Reportes","📋 Planilla de Reservas","📦 Inventario y Bodega","🍽️ Minutas","⚖️ Excepciones","🏢 Instituciones","💳 Modalidades de Pago","📧 Correos"]
-        if rol_admin == "AdminTotal":
+            permitidos_bodega={"📦 Inventario y Bodega","🍽️ Minutas"}
+            modulos_admin=[m for m,p,d in mapa_modulos if m in permitidos_bodega and permiso_habilitado(usuario_admin,p,d)]
+        elif rol_admin == "AdminTotal":
+            modulos_admin=[m for m,_,_ in mapa_modulos]
             modulos_admin += ["🏦 Datos transferencia","👥 Usuarios","🧭 Actividad","🧹 Depuración","🛡️ Respaldo"]
+        else:
+            modulos_admin=[m for m,p,d in mapa_modulos if permiso_habilitado(usuario_admin,p,d)]
+        if not modulos_admin:
+            st.warning("No tienes módulos administrativos habilitados. Solicita permisos a AdminTotal."); return
         modulo_admin = st.radio("Módulo", modulos_admin, horizontal=True, key="modulo_admin_activo", label_visibility="collapsed")
 
         # Solo se consulta/renderiza el módulo elegido. Esto evita ejecutar todas las consultas en cada interacción.
+        if modulo_admin == "⭐ Satisfacción":
+            _render_satisfaccion_gestion(st.session_state.usuario,key_prefix="admin_sat")
+
         if modulo_admin == "📊 Reportes":
             st.markdown("### 📊 Reportes de Gestión")
             st.caption("Información consolidada para seguimiento financiero, reservas y producción.")
@@ -3047,25 +3273,25 @@ def render_admin():
                 titulo_personalizado=f"📅 Semana {inicio_sem_rep.strftime('%d/%m')} → {fin_sem_rep.strftime('%d/%m')}",
             )
 
-            st.markdown("#### 3️⃣ Platos solicitados por día")
-            df_platos_dia = conn.query("""
-                SELECT fecha, plato_reservado, servicio, COUNT(*) as total_solicitado, SUM(precio_aplicado) as monto_total 
-                FROM solicitudes
-                WHERE COALESCE(tipo_registro,'RESERVA_COMERCIAL') <> 'CONSUMO_INTERNO' OR estado_consumo='Consumirá'
-                GROUP BY fecha, plato_reservado, servicio 
-                ORDER BY fecha ASC
-            """, ttl=0)
-            st.dataframe(_tabla_visible(df_platos_dia,{"fecha":"Fecha","plato_reservado":"Plato","servicio":"Servicio","total_solicitado":"Porciones reservadas","monto_total":"Monto"},["fecha"]),use_container_width=True,hide_index=True)
-            if not df_platos_dia.empty:
-                resumen_platos = (df_platos_dia.groupby("plato_reservado", as_index=False)["total_solicitado"].sum()
-                                  .sort_values("total_solicitado", ascending=False))
-                cols_platos = st.columns(4)
-                for i, (_, rp) in enumerate(resumen_platos.iterrows()):
-                    with cols_platos[i % 4]:
-                        st.markdown(f"**{rp['plato_reservado']}**")
-                        st.caption(f"{int(rp['total_solicitado'])} porciones")
-                st.info(f"📦 Total platos distintos: {len(resumen_platos)} · Total porciones: {int(resumen_platos['total_solicitado'].sum())}")
-            st.download_button("📥 Descargar Platos por Día CSV", df_platos_dia.to_csv(index=False).encode('utf-8'), "platos_por_dia.csv", "text/csv")
+            st.markdown("#### 3️⃣ Producción y conteo por servicio")
+            fecha_prod_rep = st.date_input("Fecha del reporte de producción", value=date.today(), key="reporte_prod_fecha")
+            _render_reporte_produccion_fecha(fecha_prod_rep.isoformat(), titulo=False, mostrar_nominal=True)
+            with st.expander("Histórico agregado de platos solicitados"):
+                df_platos_dia = conn.query("""
+                    WITH base AS (
+                        SELECT DISTINCT ON (rut,fecha,servicio) id,rut,fecha,servicio,plato_reservado,precio_aplicado,tipo_registro,estado_consumo
+                        FROM solicitudes
+                        WHERE COALESCE(tipo_registro,'RESERVA_COMERCIAL') <> 'CONSUMO_INTERNO' OR estado_consumo='Consumirá'
+                        ORDER BY rut,fecha,servicio,id DESC
+                    )
+                    SELECT fecha, plato_reservado, servicio, COUNT(*) as total_solicitado, SUM(precio_aplicado) as monto_total
+                    FROM base
+                    GROUP BY fecha, plato_reservado, servicio
+                    ORDER BY fecha ASC, servicio, plato_reservado
+                """, ttl=0)
+                st.dataframe(_tabla_visible(df_platos_dia,{"fecha":"Fecha","plato_reservado":"Plato","servicio":"Servicio","total_solicitado":"Porciones reservadas","monto_total":"Monto"},["fecha"]),use_container_width=True,hide_index=True)
+                if not df_platos_dia.empty:
+                    st.download_button("📥 Descargar histórico de platos CSV", df_platos_dia.to_csv(index=False).encode('utf-8'), "platos_por_dia.csv", "text/csv")
 
             st.divider()
 
@@ -3419,6 +3645,13 @@ def render_admin():
         if modulo_admin == "🍽️ Minutas":
             flash_minuta = st.session_state.pop("_flash_minuta", None)
             if flash_minuta: st.success(flash_minuta)
+            try:
+                obs_rec= get_conn().query("SELECT plato,version_receta,accion,observacion,usuario,fecha_accion,estado FROM receta_revision_coordinacion WHERE accion='OBSERVAR' ORDER BY fecha_accion DESC,id DESC",ttl=0)
+                if not obs_rec.empty:
+                    with st.expander(f"🤝 Coordinación · observaciones de recetas · {len(obs_rec)}",expanded=False):
+                        st.dataframe(_tabla_visible(obs_rec,{"plato":"Plato","version_receta":"Versión","accion":"Acción","observacion":"Observación","usuario":"Usuario","fecha_accion":"Fecha / hora","estado":"Estado"},["fecha_accion"]),use_container_width=True,hide_index=True)
+            except Exception:
+                pass
             st.markdown("#### 🍽️ Calendario semanal de minutas")
             st.caption("Vista compacta: una línea corresponde a una semana completa, de lunes a domingo.")
             conn=get_conn(); mes_ref=st.date_input("Mes a visualizar",value=date.today().replace(day=1),key="mes_minuta_admin"); ini=mes_ref.replace(day=1); fin=(ini+timedelta(days=32)).replace(day=1)-timedelta(days=1)
@@ -3443,6 +3676,60 @@ def render_admin():
                         titulo_personalizado=f"📅 Semana {lunes.strftime('%d/%m')} → {domingo.strftime('%d/%m')}",
                     )
                     semana += timedelta(days=7)
+            _sincronizar_maestro_platos()
+            with st.expander("📚 Maestro de Platos · catálogo reutilizable", expanded=False):
+                st.caption("Fuente única para crear minutas. Los platos históricos de Minutas se incorporan al maestro sin modificar costos ni recetas.")
+                mp1,mp2,mp3=st.columns(3)
+                with mp1:
+                    buscar_mp=st.text_input("Buscar plato",key="mp_buscar").strip()
+                with mp2:
+                    servicio_mp=st.selectbox("Servicio",["Todos","Desayuno","Almuerzo","Once","Cena"],key="mp_servicio")
+                with mp3:
+                    tipo_mp=st.selectbox("Tipo",["Todos","Seco","Húmedo/Guiso","Caldo/Sopa","Hipocalórico","Sin clasificar"],key="mp_tipo")
+                sql_mp="SELECT id,nombre,servicio,tipo_plato,proteina_principal,temporada,activo,descripcion FROM platos WHERE 1=1"
+                params_mp={}
+                if buscar_mp:
+                    sql_mp += " AND LOWER(nombre) LIKE :q"; params_mp["q"]="%"+buscar_mp.lower()+"%"
+                if servicio_mp!="Todos":
+                    sql_mp += " AND COALESCE(servicio,'')=:s"; params_mp["s"]=servicio_mp
+                if tipo_mp=="Sin clasificar":
+                    sql_mp += " AND TRIM(COALESCE(tipo_plato,''))=''"
+                elif tipo_mp!="Todos":
+                    sql_mp += " AND COALESCE(tipo_plato,'')=:t"; params_mp["t"]=tipo_mp
+                sql_mp += " ORDER BY nombre,servicio LIMIT 1000"
+                df_mp=conn.query(sql_mp,params=params_mp,ttl=0)
+                st.dataframe(df_mp.rename(columns={"nombre":"Plato","servicio":"Servicio","tipo_plato":"Tipo","proteina_principal":"Proteína","temporada":"Temporada","activo":"Activo","descripcion":"Descripción"}),use_container_width=True,hide_index=True)
+                if not df_mp.empty:
+                    st.download_button("⬇️ Descargar Maestro de Platos CSV",df_mp.to_csv(index=False).encode("utf-8"),"maestro_platos.csv","text/csv",use_container_width=True)
+                st.markdown("##### Agregar / completar plato")
+                with st.form("form_maestro_plato"):
+                    m1,m2=st.columns(2)
+                    with m1:
+                        nombre_mp=st.text_input("Nombre del plato*")
+                        serv_mp=st.selectbox("Servicio habitual",["","Desayuno","Almuerzo","Once","Cena"])
+                        tipo_n_mp=st.selectbox("Tipo de plato",["","Seco","Húmedo/Guiso","Caldo/Sopa","Hipocalórico"])
+                    with m2:
+                        prot_mp=st.text_input("Proteína principal")
+                        temp_mp=st.text_input("Temporada / referencia")
+                        desc_mp=st.text_input("Descripción")
+                    guardar_mp=st.form_submit_button("Guardar en Maestro",type="primary",use_container_width=True)
+                if guardar_mp:
+                    if not nombre_mp.strip():
+                        st.error("Ingresa el nombre del plato.")
+                    else:
+                        with conn.session as ses:
+                            ex_mp=execute_sql(ses,"SELECT id FROM platos WHERE LOWER(TRIM(nombre))=LOWER(TRIM(%s)) AND LOWER(TRIM(COALESCE(servicio,'')))=LOWER(TRIM(%s)) ORDER BY id LIMIT 1",(nombre_mp.strip(),serv_mp)).first()
+                            if ex_mp:
+                                execute_sql(ses,"UPDATE platos SET tipo_plato=%s,proteina_principal=%s,temporada=%s,descripcion=COALESCE(NULLIF(%s,''),descripcion),activo=1 WHERE id=%s",(tipo_n_mp or None,prot_mp.strip() or None,temp_mp.strip() or None,desc_mp.strip(),ex_mp[0]))
+                                accion_mp="ACTUALIZAR_PLATO_MAESTRO"
+                            else:
+                                execute_sql(ses,"INSERT INTO platos (nombre,servicio,valor,activo,descripcion,tipo_plato,proteina_principal,temporada) VALUES (%s,%s,0,1,%s,%s,%s,%s)",(nombre_mp.strip(),serv_mp,desc_mp.strip(),tipo_n_mp or None,prot_mp.strip() or None,temp_mp.strip() or None))
+                                accion_mp="CREAR_PLATO_MAESTRO"
+                            ses.commit()
+                        registrar_auditoria(st.session_state.usuario.get('username'),accion_mp,'platos',nombre_mp.strip(),'','catálogo actualizado',serv_mp)
+                        st.session_state["_flash_minuta"]="✅ Maestro de Platos actualizado."
+                        st.rerun()
+
             with st.expander("Agregar o editar minuta por fecha"):
                 _sincronizar_maestro_platos()
                 fecha_n=st.date_input("Fecha",value=date.today(),key="min_fecha")
@@ -3475,7 +3762,7 @@ def render_admin():
                             ex=execute_sql(ses,"SELECT id FROM minutas WHERE fecha=%s AND servicio=%s AND tipo_opcion=%s ORDER BY id LIMIT 1",(fecha_n.isoformat(),serv,opcion)).first()
                             if ex: execute_sql(ses,"UPDATE minutas SET plato=%s,dia_semana=%s,activo=1 WHERE id=%s",(plato,dnom,ex[0]))
                             else: execute_sql(ses,"INSERT INTO minutas (fecha,dia_semana,servicio,tipo_opcion,plato,activo) VALUES (%s,%s,%s,%s,%s,1)",(fecha_n.isoformat(),dnom,serv,opcion,plato))
-                            execute_sql(ses,"INSERT INTO platos (nombre,servicio,valor,activo,descripcion) SELECT %s,%s,0,1,'Creado desde editor de minuta' WHERE NOT EXISTS (SELECT 1 FROM platos WHERE LOWER(TRIM(nombre))=LOWER(TRIM(%s)) AND LOWER(TRIM(COALESCE(servicio,'')))=LOWER(TRIM(%s)))",(plato,serv,plato,serv))
+                            execute_sql(ses,"INSERT INTO platos (nombre,servicio,valor,activo,descripcion,tipo_plato) SELECT %s,%s,0,1,'Creado desde editor de minuta',CASE WHEN %s='HIPOCALORICO' THEN 'Hipocalórico' ELSE NULL END WHERE NOT EXISTS (SELECT 1 FROM platos WHERE LOWER(TRIM(nombre))=LOWER(TRIM(%s)) AND LOWER(TRIM(COALESCE(servicio,'')))=LOWER(TRIM(%s)))",(plato,serv,opcion,plato,serv))
                             ses.commit()
                         registrar_auditoria(st.session_state.usuario.get('username'),'EDITAR_MINUTA','minutas',fecha_n.isoformat(),actual,plato,f'{serv} · {opcion}')
                         st.session_state["_flash_minuta"] = "✅ Minuta guardada y actualizada."
@@ -3495,7 +3782,8 @@ def render_admin():
                                         if ex: execute_sql(ses,"UPDATE minutas SET plato=%s,dia_semana=%s,activo=1 WHERE id=%s",(str(rr['plato']),dnom,ex[0]))
                                         else: execute_sql(ses,"INSERT INTO minutas (fecha,dia_semana,servicio,tipo_opcion,plato,activo) VALUES (%s,%s,%s,%s,%s,1)",(fi.isoformat(),dnom,str(rr['servicio']),str(rr['tipo_opcion']),str(rr['plato'])))
                                     ses.commit()
-                                st.success("Carga masiva completada."); st.rerun()
+                                _sincronizar_maestro_platos()
+                                st.success("Carga masiva completada y Maestro de Platos sincronizado."); st.rerun()
                     except Exception as e: st.error(f"No fue posible leer el CSV: {e}")
             with st.expander("Copiar minuta entre meses"):
                 c1,c2=st.columns(2)
@@ -3900,7 +4188,7 @@ def render_admin():
             st.markdown("#### 🧹 Preparar base para producción")
             if st.session_state.usuario.get('rol')!='AdminTotal': st.info("Esta herramienta es exclusiva del Administrador Total.")
             else:
-                st.warning("Limpia datos transaccionales de prueba y conserva Minutas, Platos, Recetas, Usuarios, Instituciones, permisos y configuración. Genera y descarga/verifica un respaldo antes de ejecutar.")
+                st.warning("Limpia SOLO datos transaccionales de prueba. PROTEGIDOS: Usuarios y contraseñas, roles/permisos, Minutas, Maestro de Platos, Recetas, Instituciones y toda configuración/estructura. Genera y verifica un respaldo antes de ejecutar.")
                 conn=get_conn(); nr=conn.query("SELECT COUNT(*) AS n FROM solicitudes",ttl=0); nc=conn.query("SELECT COUNT(*) AS n FROM comensales",ttl=0); c1,c2=st.columns(2); c1.metric('Registros de reserva',int(nr.iloc[0]['n']) if not nr.empty else 0); c2.metric('Comensales',int(nc.iloc[0]['n']) if not nc.empty else 0)
                 respaldo_ok = bool(st.session_state.get("ultimo_backup_bytes"))
                 st.info("✅ Respaldo generado en esta sesión." if respaldo_ok else "⚠️ Primero ve a Respaldo y genera una copia verificable en esta misma sesión.")
@@ -3911,7 +4199,7 @@ def render_admin():
                     tablas_trans = [
                         'comprobantes_pago','ajustes_financieros','jornada_detalle','jornadas_produccion',
                         'solicitudes','comensales','reclamos_sugerencias','encuestas_satisfaccion',
-                        'minuta_revision_coordinacion','mermas','inventarios_fisicos','inventarios_aleatorios',
+                        'minuta_revision_coordinacion','receta_revision_coordinacion','mermas','inventarios_fisicos','inventarios_aleatorios',
                         'tareas_inventario_cocina','registro_login','auditoria_acciones'
                     ]
                     with conn.session as ses:
@@ -3923,7 +4211,7 @@ def render_admin():
                             execute_sql(ses,"DELETE FROM bodega_cargas_log")
                         ses.commit()
                     registrar_auditoria(st.session_state.usuario.get('username'),'DEPURAR_DATOS_PRUEBA','sistema','','','base preparada','Respaldo generado previamente; minutas y maestros conservados')
-                    st.success("Base transaccional preparada para producción. Minutas y maestros fueron conservados."); st.rerun()
+                    st.success("Base transaccional preparada. Usuarios/contraseñas, Minutas, Platos, Recetas, permisos, instituciones y configuración fueron conservados."); st.rerun()
 
         if modulo_admin == "🛡️ Respaldo":
             st.markdown("#### 🛡️ Respaldo total de emergencia")

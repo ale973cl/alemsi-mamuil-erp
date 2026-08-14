@@ -35,7 +35,7 @@
 - No reescribir módulos completos cuando baste un cambio localizado.
 - El circuito `Reserva -> PostgreSQL -> comprobante -> correo` es zona protegida.
 - Cocina, Bodega, Finanzas y Administración no deben impedir el circuito de reservas si presentan un error secundario.
-- No activar integraciones futuras (Google Sheets, descuento automático de bodega u otras) sin configuración y aprobación explícitas.
+- No activar integraciones futuras sin configuración y aprobación explícitas. El descuento automático de Bodega fue aprobado y solo puede ejecutarse desde **Iniciar jornada de Producción**, nunca desde Reserva.
 - Una versión solo pasa de CANDIDATA a APROBADA después de prueba real; compilar no equivale a probar producción.
 
 ## Regla v2.1.3.2 - aislamiento de portales
@@ -56,3 +56,13 @@ Antes de generar una candidata se compara el inventario de funciones con la base
 
 ## Separación de entrega
 GitHub contiene solo código ejecutable y documentación vigente. Drive/02_RESPALDO_NO_SUBIR conserva reconstrucción, código espejo y respaldos históricos.
+
+## Reglas operativas aprobadas v2.1.3.36
+- **Reserva = demanda.** Guardar o modificar una reserva no descuenta inventario.
+- **Producción = consolidación.** El conteo oficial deduplica por RUT + fecha + servicio.
+- **Bodega = movimiento físico.** El descuento automático ocurre una sola vez al iniciar la jornada y solo para platos con minuta vigente y receta ACTIVA/APROBADA.
+- Si no existe minuta o receta aprobada, la producción se registra y se informa la excepción, sin inventar un descuento.
+- ALEMSI Paso Fronterizo y ALEMSI Administrativos no generan ración sin selección explícita.
+- Coordinación solo revisa/aprueba/observa/propone; no modifica la minuta oficial.
+- AdminTotal debe poder visualizar/administrar toda nueva configuración administrativa que corresponda.
+- `platos` es el Maestro de Platos único; no crear catálogos paralelos.

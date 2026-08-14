@@ -1,0 +1,21 @@
+{
+  "AST streamlit_app.py": true,
+  "AST common.py": true,
+  "Versión v37": true,
+  "Rol Coordinación": true,
+  "Coordinación revisa Minutas": true,
+  "Coordinación revisa Recetas": true,
+  "Tabla revisión recetas": true,
+  "Receta no modificada por Coordinación": true,
+  "Reporte consolidado Cocina": true,
+  "Satisfacción visible": true,
+  "Comentarios por permiso": true,
+  "Reclamos por permiso": true,
+  "Maestro permisos ampliado": true,
+  "Depuración conserva usuarios": true,
+  "Depuración conserva permisos": true,
+  "Depuración conserva minutas": true,
+  "Depuración conserva platos": true,
+  "Depuración conserva recetas": true,
+  "Backup incluye revisión recetas": true
+}
