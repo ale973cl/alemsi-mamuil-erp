@@ -3365,8 +3365,19 @@ def render_casino():
                         )
 
                 if estado == "Pendiente":
-                    confirmar = st.checkbox(f"Confirmo iniciar la jornada completa del {fecha_j.strftime('%d/%m/%Y')}", key=f"conf_ini_j_{fecha_iso}")
-                    if st.button("▶️ INICIAR JORNADA", type="primary", use_container_width=True, disabled=not confirmar):
+                    confirmar = st.checkbox(
+                        f"Confirmo iniciar la jornada completa del {fecha_j.strftime('%d/%m/%Y')}",
+                        key=f"conf_ini_j_{fecha_iso}"
+                    )
+                    iniciar_jornada = st.button(
+                        "▶️ INICIAR JORNADA",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"iniciar_jornada_{fecha_iso}"
+                    )
+                    if iniciar_jornada and not confirmar:
+                        st.warning("Marca la casilla de confirmación antes de iniciar la jornada.")
+                    if iniciar_jornada and confirmar:
                         sin_receta = []
                         sin_minuta = []
                         faltantes_stock = []
@@ -3805,35 +3816,44 @@ def render_casino():
 
                 with accion_col:
                     st.markdown("##### Resultado de revisión")
-                    # FIN-PERF-32: radio + observación viven dentro de un form. Cambiar
-                    # APROBAR/RECHAZAR no dispara un rerun completo hasta confirmar ni vuelve
-                    # a descargar/renderizar el comprobante. Solo Confirmar ejecuta.
-                    with st.form(f"fin_form_revision_{ref_val}", clear_on_submit=False):
-                        nuevo_val = st.radio(
-                            "Acción",
-                            ["APROBADO", "RECHAZADO"],
-                            format_func=lambda x: {
-                                "APROBADO": "✅ Aprobar",
-                                "RECHAZADO": "❌ Rechazar",
-                            }[x],
-                            key=f"fin_accion_{ref_val}",
-                        )
-                        obs_val = st.text_area(
-                            "Observación",
-                            value=str(comp_val.get("observacion_validacion") or ""),
-                            placeholder="Obligatoria para rechazar.",
-                            key=f"fin_obs_bandeja_{ref_val}",
-                        )
-                        requiere_obs_val = nuevo_val == "RECHAZADO"
-                        decision_confirmada = st.checkbox(
-                            "Confirmo esta decisión financiera",
-                            value=False,
-                            key=f"fin_confirmar_decision_{ref_val}",
-                        )
-                        confirmar_revision = st.form_submit_button(
-                            "Confirmar revisión", type="primary", use_container_width=True,
-                            disabled=(not archivo_disponible or not decision_confirmada or (requiere_obs_val and not obs_val.strip())),
-                        )
+                    # FIN-FIX-40: controles fuera de st.form para que radio, observación
+                    # y confirmación actualicen inmediatamente el estado del botón.
+                    nuevo_val = st.radio(
+                        "Acción",
+                        ["APROBADO", "RECHAZADO"],
+                        format_func=lambda x: {
+                            "APROBADO": "✅ Aprobar",
+                            "RECHAZADO": "❌ Rechazar",
+                        }[x],
+                        key=f"fin_accion_{ref_val}",
+                    )
+                    obs_val = st.text_area(
+                        "Observación",
+                        value=str(comp_val.get("observacion_validacion") or ""),
+                        placeholder="Obligatoria para rechazar.",
+                        key=f"fin_obs_bandeja_{ref_val}",
+                    )
+                    requiere_obs_val = nuevo_val == "RECHAZADO"
+                    decision_confirmada = st.checkbox(
+                        "Confirmo esta decisión financiera",
+                        key=f"fin_confirmar_decision_{ref_val}",
+                    )
+                    faltante_fin = []
+                    if not archivo_disponible:
+                        faltante_fin.append("comprobante disponible")
+                    if not decision_confirmada:
+                        faltante_fin.append("confirmar la decisión")
+                    if requiere_obs_val and not obs_val.strip():
+                        faltante_fin.append("motivo del rechazo")
+                    if faltante_fin:
+                        st.caption("Para continuar falta: " + ", ".join(faltante_fin) + ".")
+                    confirmar_revision = st.button(
+                        "Confirmar revisión",
+                        type="primary",
+                        use_container_width=True,
+                        disabled=bool(faltante_fin),
+                        key=f"fin_confirmar_revision_{ref_val}",
+                    )
 
                     if confirmar_revision:
                         if requiere_obs_val and not obs_val.strip():
@@ -4581,20 +4601,34 @@ def render_admin():
                         st.dataframe(pd.DataFrame(conflictos),use_container_width=True,hide_index=True)
                     else:
                         _asegurar_revision_coordinacion()
+
+                        st.markdown("### 🤝 Validación por Coordinación")
+                        st.caption(
+                            "Una vez cargada la minuta del período, envíala a Coordinación para revisión. "
+                            "Coordinación puede Autorizar u Observar. Solo una minuta autorizada puede publicarse."
+                        )
                         _render_estado_coordinacion_admin(ini, fin)
 
                         actual_coord = _flujo_minuta_actual(ini.isoformat(), fin.isoformat())
                         estado_coord = str(actual_coord.iloc[0].get("estado") or "") if not actual_coord.empty else ""
 
+                        estados_min = set(df_min["estado"].fillna("BORRADOR").astype(str).str.upper().tolist())
+                        tiene_minuta = not df_min.empty
+
                         ab1,ab2,ab3=st.columns(3)
+
                         with ab1:
-                            if st.button("🔎 Auditar período",use_container_width=True,key="auditar_minuta_periodo"):
+                            if st.button(
+                                "🔎 Revisar / auditar minuta",
+                                use_container_width=True,
+                                key="auditar_minuta_periodo"
+                            ):
                                 with conn.session as ses:
                                     execute_sql(
                                         ses,
                                         "UPDATE minutas SET estado='AUDITADA' "
                                         "WHERE activo=1 AND fecha>=%s AND fecha<=%s "
-                                        "AND COALESCE(estado,'PUBLICABLE')='BORRADOR'",
+                                        "AND COALESCE(estado,'BORRADOR') IN ('BORRADOR','PUBLICABLE')",
                                         (ini.isoformat(),fin.isoformat())
                                     )
                                     ses.commit()
@@ -4602,14 +4636,12 @@ def render_admin():
                                     st.session_state.usuario.get('username'),
                                     'AUDITAR_MINUTA','minutas',
                                     f"{ini.isoformat()}..{fin.isoformat()}",
-                                    'BORRADOR','AUDITADA',
-                                    'Sin conflictos Opción 1/Opción 2'
+                                    'BORRADOR/PUBLICABLE','AUDITADA',
+                                    'Revisión previa al envío a Coordinación'
                                 )
-                                st.session_state["_flash_minuta"]="✅ Minuta auditada. Ahora envíala a Coordinación."
+                                st.session_state["_flash_minuta"]="✅ Minuta revisada. Ya puedes enviarla a Coordinación."
                                 st.rerun()
 
-                        estados_min = set(df_min["estado"].astype(str).str.upper().tolist())
-                        lista_para_revision = bool(estados_min) and "BORRADOR" not in estados_min
                         with ab2:
                             etiqueta_envio = (
                                 "↻ Reenviar a Coordinación"
@@ -4617,15 +4649,27 @@ def render_admin():
                                 else "📤 Enviar a Coordinación"
                             )
                             envio_bloqueado = (
-                                not lista_para_revision
+                                not tiene_minuta
                                 or estado_coord in ["EN_REVISION","AUTORIZADA","PUBLICADA"]
                             )
                             if st.button(
                                 etiqueta_envio,
                                 use_container_width=True,
                                 key="enviar_coord_minuta_periodo",
-                                disabled=envio_bloqueado
+                                disabled=envio_bloqueado,
+                                type="primary"
                             ):
+                                # Al enviar, cualquier fila BORRADOR/PUBLICABLE del período queda
+                                # marcada AUDITADA, sin modificar platos ni contenido.
+                                with conn.session as ses:
+                                    execute_sql(
+                                        ses,
+                                        "UPDATE minutas SET estado='AUDITADA' "
+                                        "WHERE activo=1 AND fecha>=%s AND fecha<=%s "
+                                        "AND COALESCE(estado,'BORRADOR') IN ('BORRADOR','PUBLICABLE')",
+                                        (ini.isoformat(),fin.isoformat())
+                                    )
+                                    ses.commit()
                                 version_coord = _enviar_minuta_coordinacion(
                                     ini.isoformat(),fin.isoformat(),
                                     st.session_state.usuario.get('username')
@@ -4683,7 +4727,9 @@ def render_admin():
                                 st.session_state["_flash_minuta"]="✅ Minuta autorizada por Coordinación y publicada para reservas."
                                 st.rerun()
 
-                        if estado_coord=="EN_REVISION":
+                        if not tiene_minuta:
+                            st.info("Carga primero una minuta dentro del período seleccionado.")
+                        elif estado_coord=="EN_REVISION":
                             st.info("La minuta está en revisión por Coordinación. Espera su decisión antes de publicar.")
                         elif estado_coord=="OBSERVADA":
                             st.warning("Coordinación observó la minuta. Corrige lo solicitado y vuelve a enviarla.")
