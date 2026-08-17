@@ -1,4 +1,4 @@
-# ALEMSI v2.1.3.40_CIERRE_ARQUITECTURA - cierre funcional, permisos y conciliación
+# ALEMSI v2.1.3.40_CIERRE_ARQUITECTURA - candidata presentación Gerencia · Cocina + bloqueo pagos
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -1408,6 +1408,291 @@ def _render_minuta_semanal(df_minuta, fecha_base=None, titulo=True, fechas_visib
         st.markdown(html, unsafe_allow_html=True)
 
 
+
+def _deuda_vencida_bloqueante(rut):
+    """RES-PAGO-40: bloquea nuevas reservas comerciales solo por servicios ya vencidos e impagos."""
+    try:
+        conn = get_conn()
+        return conn.query(
+            """
+            SELECT
+                referencia_reserva,
+                MIN(fecha) AS primera_fecha,
+                MAX(fecha) AS ultima_fecha,
+                SUM(COALESCE(precio_aplicado,precio,0)) AS monto_pendiente,
+                STRING_AGG(DISTINCT COALESCE(NULLIF(TRIM(estado_pago),''),'Pendiente'), ', ') AS estados
+            FROM solicitudes
+            WHERE rut=:rut
+              AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
+              AND fecha < :hoy
+              AND COALESCE(precio_aplicado,precio,0) > 0
+              AND COALESCE(tipo_registro,'RESERVA_COMERCIAL')='RESERVA_COMERCIAL'
+              AND LOWER(TRIM(COALESCE(estado_pago,'Pendiente'))) NOT IN (
+                    'pagado','no aplica','costo asumido','costo asumido / no cobrable'
+              )
+            GROUP BY referencia_reserva
+            ORDER BY MIN(fecha), referencia_reserva
+            """,
+            params={"rut": normalizar_rut_db(rut), "hoy": date.today().isoformat()},
+            ttl=0,
+        )
+    except Exception:
+        return pd.DataFrame()
+
+
+def _requerimiento_receta(cantidad_base, porciones, merma_pct=0, margen_pct=0):
+    """Cantidad bruta operacional: base por ración -> merma -> margen de producción."""
+    base = max(float(cantidad_base or 0), 0.0) * max(int(porciones or 0), 0)
+    merma = min(max(float(merma_pct or 0), 0.0), 95.0) / 100.0
+    margen = max(float(margen_pct or 0), 0.0) / 100.0
+    bruto = base / (1.0 - merma) if merma > 0 else base
+    return bruto * (1.0 + margen)
+
+
+def _ingredientes_produccion_v40(fecha_iso, servicio=None, permitir_borrador=True):
+    """Usa la misma demanda y tabla recetas del circuito actual; no crea una fuente paralela."""
+    df_prod, _ = _cargar_demanda_produccion_fecha(fecha_iso)
+    if servicio:
+        df_prod = df_prod[df_prod["servicio"].astype(str) == str(servicio)].copy()
+    if df_prod.empty:
+        return pd.DataFrame(columns=["Insumo","Unidad","Cantidad","Estado receta","Platos"])
+
+    conn = get_conn()
+    acumulado = {}
+    for _, fila in df_prod.iterrows():
+        plato = str(fila.get("plato") or "").strip()
+        porciones = int(fila.get("reservadas") or 0)
+        if not plato or porciones <= 0:
+            continue
+
+        receta = conn.query(
+            """
+            WITH ultima AS (
+                SELECT MAX(COALESCE(version,1)) AS version
+                FROM recetas
+                WHERE LOWER(TRIM(plato))=LOWER(TRIM(:plato))
+            )
+            SELECT insumo,cantidad,unidad,merma_pct,margen_produccion_pct,
+                   COALESCE(estado,'BORRADOR') AS estado,COALESCE(version,1) AS version
+            FROM recetas
+            WHERE LOWER(TRIM(plato))=LOWER(TRIM(:plato))
+              AND COALESCE(version,1)=(SELECT version FROM ultima)
+            ORDER BY insumo
+            """,
+            params={"plato": plato},
+            ttl=0,
+        )
+        if receta.empty:
+            continue
+
+        estados = receta["estado"].fillna("BORRADOR").astype(str).str.upper().str.strip()
+        if not permitir_borrador:
+            receta = receta[estados.isin(["ACTIVA","ACTIVO","APROBADA","APROBADO"])].copy()
+        if receta.empty:
+            continue
+
+        for _, rec in receta.iterrows():
+            insumo = str(rec.get("insumo") or "").strip()
+            unidad = str(rec.get("unidad") or "").strip() or "unidad"
+            if not insumo:
+                continue
+            cantidad = _requerimiento_receta(
+                rec.get("cantidad"), porciones,
+                rec.get("merma_pct"), rec.get("margen_produccion_pct")
+            )
+            key = (insumo.casefold(), unidad.casefold())
+            if key not in acumulado:
+                acumulado[key] = {
+                    "Insumo": insumo, "Unidad": unidad, "Cantidad": 0.0,
+                    "Estado receta": set(), "Platos": set()
+                }
+            acumulado[key]["Cantidad"] += cantidad
+            acumulado[key]["Estado receta"].add(str(rec.get("estado") or "BORRADOR"))
+            acumulado[key]["Platos"].add(plato)
+
+    filas = []
+    for item in acumulado.values():
+        filas.append({
+            "Insumo": item["Insumo"],
+            "Unidad": item["Unidad"],
+            "Cantidad": round(item["Cantidad"], 3),
+            "Estado receta": ", ".join(sorted(item["Estado receta"])),
+            "Platos": ", ".join(sorted(item["Platos"])),
+        })
+    return pd.DataFrame(filas).sort_values(["Insumo","Unidad"]).reset_index(drop=True) if filas else pd.DataFrame(
+        columns=["Insumo","Unidad","Cantidad","Estado receta","Platos"]
+    )
+
+
+def _resumen_servicio_v40(fecha_iso, servicio):
+    """Concilia total del servicio con ALEMSI nominal sin duplicar motores de conteo."""
+    df_prod, df_alemsi = _cargar_demanda_produccion_fecha(fecha_iso)
+    total = df_prod[df_prod["servicio"].astype(str)==servicio].copy()
+    nominal = df_alemsi[df_alemsi["servicio"].astype(str)==servicio].copy() if not df_alemsi.empty else pd.DataFrame()
+    if total.empty:
+        return pd.DataFrame(), nominal
+
+    total["tipo_opcion"] = total["tipo_opcion"].fillna("").astype(str)
+    filas = []
+    for tipo, grupo in total.groupby("tipo_opcion", dropna=False):
+        total_tipo = int(grupo["reservadas"].sum())
+        alemsi_tipo = 0
+        if not nominal.empty:
+            alemsi_tipo = int((nominal["tipo_opcion"].fillna("").astype(str)==str(tipo)).sum())
+        filas.append({
+            "Opción": str(tipo or "Sin clasificación"),
+            "Instituciones": max(total_tipo - alemsi_tipo, 0),
+            "ALEMSI": alemsi_tipo,
+            "Total": total_tipo,
+        })
+    return pd.DataFrame(filas), nominal
+
+
+def generar_pdf_servicio_produccion_v40(fecha_iso, servicio):
+    """Hoja operacional Carta por servicio: resumen, nominal ALEMSI, insumos y observaciones."""
+    resumen, nominal = _resumen_servicio_v40(fecha_iso, servicio)
+    ingredientes = _ingredientes_produccion_v40(fecha_iso, servicio=servicio, permitir_borrador=True)
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=LETTER, rightMargin=10*mm, leftMargin=10*mm,
+        topMargin=10*mm, bottomMargin=10*mm
+    )
+    styles = getSampleStyleSheet()
+    titulo = ParagraphStyle(
+        f"prod_title_{servicio}", parent=styles["Heading1"], fontSize=16,
+        leading=18, textColor=colors.HexColor("#0A2F6B"), alignment=TA_CENTER, spaceAfter=5
+    )
+    normal = ParagraphStyle(
+        f"prod_normal_{servicio}", parent=styles["BodyText"], fontSize=7.2,
+        leading=8.6, textColor=colors.HexColor("#24342C")
+    )
+    head = ParagraphStyle(
+        f"prod_head_{servicio}", parent=normal, fontName="Helvetica-Bold",
+        textColor=colors.white, alignment=TA_CENTER
+    )
+    story = [
+        Paragraph("ALEMSI · CASINO MAMUIL MALAL", titulo),
+        Paragraph(f"HOJA OPERACIONAL · {servicio.upper()} · {date.fromisoformat(fecha_iso).strftime('%d/%m/%Y')}", titulo),
+        Spacer(1, 2*mm),
+    ]
+
+    if resumen.empty:
+        story.append(Paragraph("No hay raciones válidas para este servicio.", normal))
+        doc.build(story)
+        return buf.getvalue()
+
+    datos = [[Paragraph("Opción",head),Paragraph("Instituciones",head),Paragraph("ALEMSI",head),Paragraph("Total",head)]]
+    for _, r in resumen.iterrows():
+        datos.append([Paragraph(str(r["Opción"]),normal), int(r["Instituciones"]), int(r["ALEMSI"]), int(r["Total"])])
+    datos.append([
+        Paragraph("<b>TOTAL SERVICIO</b>",normal),
+        int(resumen["Instituciones"].sum()), int(resumen["ALEMSI"].sum()), int(resumen["Total"].sum())
+    ])
+    tabla = Table(datos, colWidths=[78*mm,32*mm,28*mm,28*mm], repeatRows=1)
+    tabla.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#0A2F6B")),
+        ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#EEF5F1")),
+        ("GRID",(0,0),(-1,-1),0.45,colors.HexColor("#AFC5B8")),
+        ("ALIGN",(1,1),(-1,-1),"CENTER"), ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ("TOPPADDING",(0,0),(-1,-1),4), ("BOTTOMPADDING",(0,0),(-1,-1),4),
+    ]))
+    story += [tabla, Spacer(1, 4*mm)]
+
+    nom_rows = [[Paragraph("PERSONAL ALEMSI · CONTROL DE ENTREGA",head)]]
+    if nominal.empty:
+        nom_rows.append([Paragraph("Sin personal ALEMSI registrado para este servicio.",normal)])
+    else:
+        for _, n in nominal.iterrows():
+            nom_rows.append([Paragraph(
+                f"☐ &nbsp; <b>{n.get('nombre','')}</b><br/>{n.get('rut','')} · {n.get('plato','')}",
+                normal
+            )])
+        nom_rows.append([Paragraph(f"<b>Total ALEMSI: {len(nominal)}</b>",normal)])
+    nom_tab = Table(nom_rows, colWidths=[88*mm])
+    nom_tab.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#086B37")),
+        ("GRID",(0,0),(-1,-1),0.45,colors.HexColor("#AFC5B8")),
+        ("VALIGN",(0,0),(-1,-1),"TOP"), ("TOPPADDING",(0,0),(-1,-1),4),
+        ("BOTTOMPADDING",(0,0),(-1,-1),4), ("LEFTPADDING",(0,0),(-1,-1),5),
+    ]))
+
+    ing_rows = [[Paragraph(f"INSUMOS PARA PRODUCIR {servicio.upper()}",head)]]
+    if ingredientes.empty:
+        ing_rows.append([Paragraph(
+            "Sin receta disponible para los platos de este servicio. No se inventan cantidades.",
+            normal
+        )])
+    else:
+        for _, i in ingredientes.iterrows():
+            marca = " · BORRADOR" if "BORRADOR" in str(i["Estado receta"]).upper() else ""
+            ing_rows.append([Paragraph(
+                f"<b>{i['Insumo']}</b> · {i['Cantidad']:g} {i['Unidad']}{marca}",
+                normal
+            )])
+    ing_tab = Table(ing_rows, colWidths=[88*mm])
+    ing_tab.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#0A2F6B")),
+        ("GRID",(0,0),(-1,-1),0.45,colors.HexColor("#AFC5B8")),
+        ("VALIGN",(0,0),(-1,-1),"TOP"), ("TOPPADDING",(0,0),(-1,-1),4),
+        ("BOTTOMPADDING",(0,0),(-1,-1),4), ("LEFTPADDING",(0,0),(-1,-1),5),
+    ]))
+
+    paralelo = Table([[nom_tab, ing_tab]], colWidths=[90*mm,90*mm])
+    paralelo.setStyle(TableStyle([
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("LEFTPADDING",(0,0),(-1,-1),1), ("RIGHTPADDING",(0,0),(-1,-1),1),
+    ]))
+    story += [paralelo, Spacer(1, 4*mm)]
+
+    obs = Table([
+        [Paragraph("<b>OBSERVACIONES / INCIDENCIAS</b>",normal)],
+        [""], [""],
+        [Paragraph("Al cierre: registrar raciones adicionales, faltantes, sustituciones, insumos extra/devoluciones y motivo.",normal)],
+    ], colWidths=[180*mm], rowHeights=[7*mm,11*mm,11*mm,8*mm])
+    obs.setStyle(TableStyle([
+        ("GRID",(0,0),(-1,-1),0.45,colors.HexColor("#AFC5B8")),
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#EEF5F1")),
+        ("VALIGN",(0,0),(-1,-1),"TOP"), ("LEFTPADDING",(0,0),(-1,-1),5),
+    ]))
+    story.append(obs)
+    doc.build(story)
+    return buf.getvalue()
+
+
+def generar_pdf_ingredientes_dia_v40(fecha_iso):
+    """Consolidado Carta de insumos de todos los servicios del día."""
+    ingredientes = _ingredientes_produccion_v40(fecha_iso, permitir_borrador=True)
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf,pagesize=LETTER,rightMargin=12*mm,leftMargin=12*mm,topMargin=12*mm,bottomMargin=12*mm)
+    styles=getSampleStyleSheet()
+    titulo=ParagraphStyle("ing_dia_title",parent=styles["Heading1"],fontSize=16,textColor=colors.HexColor("#0A2F6B"),alignment=TA_CENTER)
+    normal=ParagraphStyle("ing_dia_normal",parent=styles["BodyText"],fontSize=7.5,leading=9)
+    story=[Paragraph("ALEMSI · CASINO MAMUIL MALAL",titulo),
+           Paragraph(f"INSUMOS TOTALES DE PRODUCCIÓN · {date.fromisoformat(fecha_iso).strftime('%d/%m/%Y')}",titulo),
+           Spacer(1,4*mm)]
+    if ingredientes.empty:
+        story.append(Paragraph("No existen recetas suficientes para calcular el consolidado del día.",normal))
+    else:
+        data=[["Ingrediente","Unidad","Cantidad","Estado"]]
+        for _,r in ingredientes.iterrows():
+            data.append([r["Insumo"],r["Unidad"],f"{r['Cantidad']:g}",r["Estado receta"]])
+        t=Table(data,colWidths=[75*mm,30*mm,32*mm,38*mm],repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#086B37")),
+            ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+            ("GRID",(0,0),(-1,-1),0.45,colors.HexColor("#AFC5B8")),
+            ("FONTSIZE",(0,0),(-1,-1),7.2),("VALIGN",(0,0),(-1,-1),"TOP"),
+            ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
+        ]))
+        story.append(t)
+        story.append(Spacer(1,3*mm))
+        story.append(Paragraph("Las recetas BORRADOR son editables y deben ser validadas por Cocina/AdminCasino antes de activar descuentos de Bodega.",normal))
+    doc.build(story)
+    return buf.getvalue()
+
+
 def render_comensal():
     if st.session_state.rut_actual:
         rut=st.session_state.rut_actual
@@ -1417,6 +1702,10 @@ def render_comensal():
         nombre=com.iloc[0]['nombre']
         institucion=com.iloc[0]['institucion'] if 'institucion' in com.columns and com.iloc[0]['institucion'] else "Visitas"
         precio_dia, glosa_precio = get_precio_persona_institucion(rut, institucion)
+
+        if st.button("← Volver al inicio", key="volver_inicio_comensal_identificado"):
+            volver_inicio()
+            st.rerun()
 
         st.markdown(f'<div class="al-card"><h3>Hola {nombre} 👋 - {institucion}</h3><p>RUT: {rut} | {glosa_precio}: {formato_clp(precio_dia)}</p></div>', unsafe_allow_html=True)
 
@@ -1431,6 +1720,30 @@ def render_comensal():
             )
             es_alemsi = bool(tipo_alemsi)
             es_coordinador_comensal = inst_cf == "coordinadores"
+
+            deuda_bloqueante = pd.DataFrame()
+            if not es_alemsi and not es_coordinador_comensal:
+                deuda_bloqueante = _deuda_vencida_bloqueante(rut)
+            if not deuda_bloqueante.empty:
+                monto_bloqueado = int(pd.to_numeric(deuda_bloqueante["monto_pendiente"], errors="coerce").fillna(0).sum())
+                st.error(
+                    "Tienes uno o más servicios anteriores con pago pendiente o rechazado. "
+                    "Debes regularizar esos pagos antes de realizar una nueva reserva."
+                )
+                vista_deuda = deuda_bloqueante.copy()
+                vista_deuda["primera_fecha"] = vista_deuda["primera_fecha"].apply(fecha_visible)
+                vista_deuda["ultima_fecha"] = vista_deuda["ultima_fecha"].apply(fecha_visible)
+                vista_deuda["monto_pendiente"] = vista_deuda["monto_pendiente"].apply(lambda x: formato_clp(int(float(x or 0))))
+                st.dataframe(
+                    vista_deuda.rename(columns={
+                        "referencia_reserva":"Reserva","primera_fecha":"Primer servicio",
+                        "ultima_fecha":"Último servicio","monto_pendiente":"Monto pendiente","estados":"Estado"
+                    }),
+                    use_container_width=True, hide_index=True
+                )
+                st.metric("Total pendiente vencido", formato_clp(monto_bloqueado))
+                st.info("Puedes revisar o cancelar tus reservas existentes desde “Mis reservas”. El bloqueo se libera automáticamente cuando Finanzas deja el pago como Pagado.")
+
             resultado_anterior = st.session_state.get("resultado_reserva")
             if resultado_anterior:
                 if resultado_anterior.get("ok"):
@@ -1451,6 +1764,9 @@ def render_comensal():
                     st.session_state.fechas_calendario = []
                     st.session_state.pop("resultado_reserva", None)
                     st.rerun()
+                st.stop()
+
+            if not deuda_bloqueante.empty:
                 st.stop()
 
             if es_alemsi:
@@ -2510,6 +2826,16 @@ def render_casino():
             if not permiso_habilitado(usuario.get('username'),'ver_cocina',True):
                 st.warning('Tu función Cocina está deshabilitada por el Administrador Total.')
                 return
+            # COC-NAV-40: menú principal visible inmediatamente al entrar.
+            modulo_cocina = st.radio(
+                "Sección",
+                ["📅 Ver minuta", "▶️ Jornada de producción", "📖 Recetas", "📦 Bodega operativa"],
+                horizontal=True, key="modulo_cocina_activo", label_visibility="collapsed"
+            )
+            if st.session_state.get("_ultimo_modulo_cocina") != modulo_cocina:
+                st.session_state["_ultimo_modulo_cocina"] = modulo_cocina
+                _scroll_top()
+
             # COORD-REC-37: reporte consolidado, sin hilos de correo ni modificación automática.
             try:
                 obs_coord=get_conn().query("SELECT plato,version_receta,accion,observacion,usuario,fecha_accion,estado FROM receta_revision_coordinacion WHERE accion='OBSERVAR' ORDER BY fecha_accion DESC,id DESC",ttl=0)
@@ -2572,91 +2898,82 @@ def render_casino():
                         key="cocina_tarea_inventario_id",
                     )
                     if tarea_id is None:
-                        st.info("Selecciona una tarea para gestionarla.")
-                        return
-                    tarea_sel = df_tareas_cocina[
-                        df_tareas_cocina["id"].astype(int) == int(tarea_id)
-                    ].iloc[0]
-                    st.caption(
-                        f"Solicitud: {tarea_sel.get('detalle') or 'Inventario solicitado'}"
-                    )
-                    tc1, tc2 = st.columns(2)
-                    with tc1:
-                        if str(tarea_sel["estado"]) == "Pendiente":
+                        st.info("Selecciona una tarea para gestionarla. Los módulos de Cocina permanecen disponibles abajo.")
+                    if tarea_id is not None:
+                        tarea_sel = df_tareas_cocina[
+                            df_tareas_cocina["id"].astype(int) == int(tarea_id)
+                        ].iloc[0]
+                        st.caption(
+                            f"Solicitud: {tarea_sel.get('detalle') or 'Inventario solicitado'}"
+                        )
+                        tc1, tc2 = st.columns(2)
+                        with tc1:
+                            if str(tarea_sel["estado"]) == "Pendiente":
+                                if st.button(
+                                    "▶️ Iniciar tarea",
+                                    use_container_width=True,
+                                    key=f"iniciar_tarea_inv_{tarea_id}",
+                                ):
+                                    ahora_t = datetime.now().isoformat()
+                                    with conn_tareas.session as ses_t:
+                                        execute_sql(
+                                            ses_t,
+                                            "UPDATE tareas_inventario_cocina "
+                                            "SET estado='En proceso',iniciado_por=%s,fecha_inicio=%s WHERE id=%s",
+                                            (usuario.get("username"), ahora_t, int(tarea_id)),
+                                        )
+                                        ses_t.commit()
+                                    registrar_auditoria(
+                                        usuario.get("username"),
+                                        "INICIAR_TAREA_INVENTARIO",
+                                        "tareas_inventario_cocina",
+                                        str(tarea_id),
+                                        "Pendiente",
+                                        "En proceso",
+                                        "",
+                                    )
+                                    st.success("Tarea iniciada.")
+                                    st.rerun()
+                        with tc2:
+                            resultado_t = st.text_area(
+                                "Resultado / conteo / observaciones",
+                                value=str(tarea_sel.get("resultado") or ""),
+                                key=f"resultado_tarea_inv_{tarea_id}",
+                                placeholder="Registra el resultado del inventario. Esto no modifica el stock oficial.",
+                            )
                             if st.button(
-                                "▶️ Iniciar tarea",
+                                "📤 Enviar a revisión",
+                                type="primary",
                                 use_container_width=True,
-                                key=f"iniciar_tarea_inv_{tarea_id}",
+                                disabled=(str(tarea_sel["estado"]) == "Pendiente" or not resultado_t.strip()),
+                                key=f"enviar_tarea_inv_{tarea_id}",
                             ):
                                 ahora_t = datetime.now().isoformat()
                                 with conn_tareas.session as ses_t:
                                     execute_sql(
                                         ses_t,
                                         "UPDATE tareas_inventario_cocina "
-                                        "SET estado='En proceso',iniciado_por=%s,fecha_inicio=%s WHERE id=%s",
-                                        (usuario.get("username"), ahora_t, int(tarea_id)),
+                                        "SET estado='Enviado a revisión',resultado=%s,completado_por=%s,fecha_completado=%s "
+                                        "WHERE id=%s",
+                                        (
+                                            resultado_t.strip(),
+                                            usuario.get("username"),
+                                            ahora_t,
+                                            int(tarea_id),
+                                        ),
                                     )
                                     ses_t.commit()
                                 registrar_auditoria(
                                     usuario.get("username"),
-                                    "INICIAR_TAREA_INVENTARIO",
+                                    "ENVIAR_TAREA_INVENTARIO_REVISION",
                                     "tareas_inventario_cocina",
                                     str(tarea_id),
-                                    "Pendiente",
-                                    "En proceso",
-                                    "",
+                                    str(tarea_sel["estado"]),
+                                    "Enviado a revisión",
+                                    resultado_t.strip(),
                                 )
-                                st.success("Tarea iniciada.")
+                                st.success("Resultado enviado a Administración Casino para revisión.")
                                 st.rerun()
-                    with tc2:
-                        resultado_t = st.text_area(
-                            "Resultado / conteo / observaciones",
-                            value=str(tarea_sel.get("resultado") or ""),
-                            key=f"resultado_tarea_inv_{tarea_id}",
-                            placeholder="Registra el resultado del inventario. Esto no modifica el stock oficial.",
-                        )
-                        if st.button(
-                            "📤 Enviar a revisión",
-                            type="primary",
-                            use_container_width=True,
-                            disabled=(str(tarea_sel["estado"]) == "Pendiente" or not resultado_t.strip()),
-                            key=f"enviar_tarea_inv_{tarea_id}",
-                        ):
-                            ahora_t = datetime.now().isoformat()
-                            with conn_tareas.session as ses_t:
-                                execute_sql(
-                                    ses_t,
-                                    "UPDATE tareas_inventario_cocina "
-                                    "SET estado='Enviado a revisión',resultado=%s,completado_por=%s,fecha_completado=%s "
-                                    "WHERE id=%s",
-                                    (
-                                        resultado_t.strip(),
-                                        usuario.get("username"),
-                                        ahora_t,
-                                        int(tarea_id),
-                                    ),
-                                )
-                                ses_t.commit()
-                            registrar_auditoria(
-                                usuario.get("username"),
-                                "ENVIAR_TAREA_INVENTARIO_REVISION",
-                                "tareas_inventario_cocina",
-                                str(tarea_id),
-                                str(tarea_sel["estado"]),
-                                "Enviado a revisión",
-                                resultado_t.strip(),
-                            )
-                            st.success("Resultado enviado a Administración Casino para revisión.")
-                            st.rerun()
-
-            modulo_cocina = st.radio(
-                "Sección",
-                ["📅 Ver minuta", "▶️ Jornada de producción", "📖 Recetas", "📦 Bodega operativa"],
-                horizontal=True, key="modulo_cocina_activo", label_visibility="collapsed"
-            )
-            if st.session_state.get("_ultimo_modulo_cocina") != modulo_cocina:
-                st.session_state["_ultimo_modulo_cocina"] = modulo_cocina
-                _scroll_top()
 
             if modulo_cocina == "📅 Ver minuta":
                 st.markdown("#### 📅 Minuta por período")
@@ -2681,8 +2998,77 @@ def render_casino():
                 conn = get_conn()
                 df_prod, df_alemsi_personas = _cargar_demanda_produccion_fecha(fecha_iso)
                 if not df_prod.empty:
-                    pdf_jornada=generar_pdf_jornada_alemsi(fecha_iso,df_prod,df_alemsi_personas)
-                    st.download_button("🖨️ PDF corporativo · jornada completa",pdf_jornada,file_name=f"ALEMSI_Jornada_{fecha_iso}.pdf",mime="application/pdf",use_container_width=True,key="pdf_jornada_completa")
+                    total_jornada = int(df_prod["reservadas"].sum())
+                    total_alemsi = int(len(df_alemsi_personas)) if not df_alemsi_personas.empty else 0
+                    total_otras = max(total_jornada - total_alemsi, 0)
+                    st.markdown(
+                        f"""
+                        <div style="background:linear-gradient(135deg,#0A2F6B,#086B37);color:white;padding:18px 20px;border-radius:16px;margin-bottom:12px">
+                          <div style="font-size:13px;opacity:.9">ALEMSI · PRODUCCIÓN DEL DÍA</div>
+                          <div style="font-size:24px;font-weight:800;margin:4px 0">{fecha_j.strftime('%d/%m/%Y')}</div>
+                          <div style="display:flex;gap:24px;flex-wrap:wrap">
+                            <b>Total a producir: {total_jornada}</b>
+                            <span>ALEMSI: {total_alemsi}</span>
+                            <span>Otras instituciones: {total_otras}</span>
+                          </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                    for servicio in ["Desayuno","Almuerzo","Once","Cena"]:
+                        g = df_prod[df_prod["servicio"].astype(str)==servicio].copy()
+                        if g.empty:
+                            continue
+                        resumen_s, nominal_s = _resumen_servicio_v40(fecha_iso, servicio)
+                        st.markdown(f"### {servicio} · {int(g['reservadas'].sum())} raciones")
+                        if not resumen_s.empty:
+                            st.dataframe(resumen_s, use_container_width=True, hide_index=True)
+                        col_nom, col_ing = st.columns(2)
+                        with col_nom:
+                            st.markdown("##### 👥 Personal ALEMSI")
+                            if nominal_s.empty:
+                                st.caption("Sin personal ALEMSI para este servicio.")
+                            else:
+                                nom_v = nominal_s[["nombre","rut","plato"]].copy()
+                                nom_v.insert(0,"✓","☐")
+                                st.dataframe(nom_v.rename(columns={"nombre":"Nombre","rut":"RUT","plato":"Plato"}),use_container_width=True,hide_index=True)
+                                st.caption(f"Total ALEMSI: {len(nominal_s)}")
+                        with col_ing:
+                            st.markdown(f"##### 📦 Insumos · {servicio}")
+                            ing_s = _ingredientes_produccion_v40(fecha_iso, servicio=servicio, permitir_borrador=True)
+                            if ing_s.empty:
+                                st.warning("Sin receta disponible para calcular insumos.")
+                            else:
+                                st.dataframe(ing_s[["Insumo","Unidad","Cantidad","Estado receta"]],use_container_width=True,hide_index=True)
+                                if ing_s["Estado receta"].astype(str).str.upper().str.contains("BORRADOR").any():
+                                    st.caption("Incluye recetas BORRADOR para visualización; no habilita descuento automático de Bodega.")
+                        pdf_s = generar_pdf_servicio_produccion_v40(fecha_iso, servicio)
+                        st.download_button(
+                            f"🖨️ PDF {servicio}",
+                            pdf_s,
+                            file_name=f"ALEMSI_Produccion_{servicio}_{fecha_iso}.pdf",
+                            mime="application/pdf",
+                            use_container_width=True,
+                            key=f"pdf_servicio_{servicio}_{fecha_iso}"
+                        )
+                        st.divider()
+
+                    st.markdown("### 📦 Total de insumos a considerar para la producción del día")
+                    ing_dia = _ingredientes_produccion_v40(fecha_iso, permitir_borrador=True)
+                    if ing_dia.empty:
+                        st.warning("Aún no hay recetas suficientes para consolidar los insumos del día.")
+                    else:
+                        st.dataframe(ing_dia[["Insumo","Unidad","Cantidad","Estado receta","Platos"]],use_container_width=True,hide_index=True)
+                        pdf_ing = generar_pdf_ingredientes_dia_v40(fecha_iso)
+                        st.download_button(
+                            "🖨️ PDF · insumos totales del día",
+                            pdf_ing,
+                            file_name=f"ALEMSI_Insumos_Dia_{fecha_iso}.pdf",
+                            mime="application/pdf",
+                            use_container_width=True,
+                            key=f"pdf_ing_dia_{fecha_iso}"
+                        )
 
                 estado_j = conn.query("SELECT * FROM jornadas_produccion WHERE fecha=:f", params={"f":fecha_iso}, ttl=0)
                 estado = str(estado_j.iloc[0]["estado"]) if not estado_j.empty else "Pendiente"
@@ -2712,11 +3098,6 @@ def render_casino():
                             }),
                             use_container_width=True, hide_index=True
                         )
-
-                if st.button("👁️ Visualizar jornada completa", use_container_width=True):
-                    st.session_state["ver_jornada"] = fecha_iso
-                if st.session_state.get("ver_jornada") == fecha_iso:
-                    _render_reporte_produccion_fecha(fecha_iso, titulo=False, mostrar_nominal=True)
 
                 if estado == "Pendiente":
                     confirmar = st.checkbox(f"Confirmo iniciar la jornada completa del {fecha_j.strftime('%d/%m/%Y')}", key=f"conf_ini_j_{fecha_iso}")
@@ -2750,15 +3131,17 @@ def render_casino():
                                         continue
                                     recetas = execute_sql(
                                         ses,
-                                        "SELECT insumo,cantidad FROM recetas WHERE LOWER(TRIM(plato))=LOWER(TRIM(%s)) "
-                                        "AND UPPER(TRIM(COALESCE(estado,''))) IN ('ACTIVA','ACTIVO','APROBADA','APROBADO')",
-                                        (plato_prod,),
+                                        "SELECT insumo,cantidad,COALESCE(merma_pct,0) AS merma_pct,COALESCE(margen_produccion_pct,0) AS margen_produccion_pct "
+                                        "FROM recetas WHERE LOWER(TRIM(plato))=LOWER(TRIM(%s)) "
+                                        "AND UPPER(TRIM(COALESCE(estado,''))) IN ('ACTIVA','ACTIVO','APROBADA','APROBADO') "
+                                        "AND COALESCE(version,1)=(SELECT MAX(COALESCE(version,1)) FROM recetas WHERE LOWER(TRIM(plato))=LOWER(TRIM(%s)) AND UPPER(TRIM(COALESCE(estado,''))) IN ('ACTIVA','ACTIVO','APROBADA','APROBADO'))",
+                                        (plato_prod, plato_prod),
                                     ).mappings().all()
                                     if not recetas:
                                         sin_receta.append(plato_prod)
                                         continue
                                     for rec in recetas:
-                                        requerido = float(rec['cantidad'] or 0) * porciones
+                                        requerido = _requerimiento_receta(rec['cantidad'], porciones, rec.get('merma_pct',0), rec.get('margen_produccion_pct',0))
                                         if requerido <= 0:
                                             continue
                                         lotes = execute_sql(ses, "SELECT id,stock,nombre_articulo FROM bodega_inventario WHERE nombre_articulo ILIKE %s AND COALESCE(stock,0)>0 ORDER BY caduca ASC NULLS LAST,id ASC FOR UPDATE", (f"%{rec['insumo']}%",)).mappings().all()
@@ -4001,6 +4384,111 @@ def render_admin():
                         registrar_auditoria(st.session_state.usuario.get('username'),accion_mp,'platos',nombre_mp.strip(),'','catálogo actualizado',serv_mp)
                         st.session_state["_flash_minuta"]="✅ Maestro de Platos actualizado."
                         st.rerun()
+
+
+            with st.expander("📖 Recetas · editable y versionada", expanded=False):
+                st.caption(
+                    "Las recetas de referencia se guardan como BORRADOR y son editables. "
+                    "Guardar cambios crea una nueva versión; nunca borra la anterior. "
+                    "Solo una receta APROBADA/ACTIVA puede descontar Bodega al iniciar producción."
+                )
+                conn = get_conn()
+                df_platos_rec = conn.query(
+                    "SELECT DISTINCT nombre FROM platos WHERE COALESCE(activo,1)=1 ORDER BY nombre",
+                    ttl=0,
+                )
+                platos_rec = df_platos_rec["nombre"].dropna().astype(str).tolist() if not df_platos_rec.empty else []
+                plato_rec = selector_neutro("Plato / receta", platos_rec, key="admin_receta_plato")
+                if plato_rec is not None:
+                    df_rec = conn.query(
+                        """
+                        WITH u AS (
+                            SELECT MAX(COALESCE(version,1)) AS version
+                            FROM recetas WHERE LOWER(TRIM(plato))=LOWER(TRIM(:p))
+                        )
+                        SELECT insumo,cantidad,unidad,COALESCE(merma_pct,0) AS merma_pct,
+                               COALESCE(margen_produccion_pct,0) AS margen_produccion_pct,
+                               COALESCE(estado,'BORRADOR') AS estado,COALESCE(version,1) AS version,
+                               COALESCE(instrucciones,'') AS instrucciones
+                        FROM recetas
+                        WHERE LOWER(TRIM(plato))=LOWER(TRIM(:p))
+                          AND COALESCE(version,1)=(SELECT version FROM u)
+                        ORDER BY insumo
+                        """,
+                        params={"p": plato_rec},
+                        ttl=0,
+                    )
+                    version_actual = int(df_rec["version"].max()) if not df_rec.empty else 0
+                    st.caption(f"Versión actual: {version_actual or 'Sin receta'}")
+                    base_editor = df_rec[["insumo","cantidad","unidad","merma_pct","margen_produccion_pct","instrucciones"]].copy() if not df_rec.empty else pd.DataFrame(
+                        [{"insumo":"","cantidad":0.0,"unidad":"kg","merma_pct":0.0,"margen_produccion_pct":5.0,"instrucciones":"Validar con Cocina."}]
+                    )
+                    editada = st.data_editor(
+                        base_editor,
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        hide_index=True,
+                        key=f"editor_receta_{plato_rec}",
+                        column_config={
+                            "insumo": st.column_config.TextColumn("Insumo", required=True),
+                            "cantidad": st.column_config.NumberColumn("Cantidad / ración", min_value=0.0, format="%.4f"),
+                            "unidad": st.column_config.TextColumn("Unidad"),
+                            "merma_pct": st.column_config.NumberColumn("Merma %", min_value=0.0, max_value=95.0, format="%.1f"),
+                            "margen_produccion_pct": st.column_config.NumberColumn("Margen %", min_value=0.0, max_value=100.0, format="%.1f"),
+                            "instrucciones": st.column_config.TextColumn("Observación / fuente"),
+                        }
+                    )
+                    estado_nuevo = st.selectbox(
+                        "Estado de la nueva versión",
+                        ["BORRADOR","APROBADA"],
+                        index=0,
+                        key=f"estado_receta_nueva_{plato_rec}",
+                        help="Usa APROBADA solo después de validar gramajes, mermas y sustituciones con Cocina."
+                    )
+                    confirmar_rec = st.checkbox(
+                        "Confirmo que revisé cantidades, unidades, merma y margen.",
+                        key=f"conf_rec_{plato_rec}"
+                    )
+                    if st.button(
+                        "Guardar nueva versión de receta",
+                        type="primary",
+                        use_container_width=True,
+                        disabled=not confirmar_rec,
+                        key=f"guardar_rec_{plato_rec}"
+                    ):
+                        limpia = editada.copy()
+                        limpia["insumo"] = limpia["insumo"].fillna("").astype(str).str.strip()
+                        limpia = limpia[limpia["insumo"]!=""]
+                        if limpia.empty:
+                            st.error("La receta debe contener al menos un insumo.")
+                        else:
+                            nueva_version = version_actual + 1
+                            with conn.session as ses:
+                                for _, rr in limpia.iterrows():
+                                    execute_sql(
+                                        ses,
+                                        "INSERT INTO recetas (plato,insumo,cantidad,unidad,instrucciones,estado,version,merma_pct,margen_produccion_pct) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                                        (
+                                            plato_rec, str(rr["insumo"]).strip(), float(rr.get("cantidad") or 0),
+                                            str(rr.get("unidad") or "unidad").strip(),
+                                            str(rr.get("instrucciones") or "").strip(),
+                                            estado_nuevo, nueva_version,
+                                            float(rr.get("merma_pct") or 0),
+                                            float(rr.get("margen_produccion_pct") or 0),
+                                        )
+                                    )
+                                ses.commit()
+                            registrar_auditoria(
+                                st.session_state.usuario.get("username"),
+                                "NUEVA_VERSION_RECETA",
+                                "recetas",
+                                plato_rec,
+                                str(version_actual),
+                                str(nueva_version),
+                                f"Estado {estado_nuevo}"
+                            )
+                            st.success(f"Receta guardada como versión {nueva_version} · {estado_nuevo}.")
+                            st.rerun()
 
             with st.expander("Agregar o editar minuta por fecha"):
                 _sincronizar_maestro_platos()
