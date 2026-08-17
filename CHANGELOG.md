@@ -129,3 +129,10 @@
 - FIN-MOD-01: normalización visual de modalidades históricas sin alterar PostgreSQL.
 - FIN-MOD-02: distribución por modalidad en formato horizontal compacto y legible.
 - FIN-MOD-03: filtros y tablas de Finanzas usan las mismas etiquetas normalizadas.
+
+## v2.1.3.39 — Cierre funcional para revisión
+- AdminCasino recupera módulos operativos base: Dashboard, Reportes, Reservas, Bodega, Minutas, Satisfacción, Excepciones e Instituciones.
+- Bienvenida estandarizada por perfil.
+- Reportes: conciliación de comensales/estado de pago, histórico de pagados y ranking de platos.
+- Coordinación queda identificada como propuesta de etapa posterior y no como rol habilitable en esta entrega.
+- Se mantiene la arquitectura de Bodega/Inventario como expansión posterior; no se presenta como alcance operativo cerrado.

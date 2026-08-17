@@ -422,8 +422,8 @@ PERMISOS_DISPONIBLES = {
     "ver_reclamos": "Calidad · Reclamos / sugerencias / felicitaciones",
 
     # Coordinación: acceso deliberadamente limitado
-    "coord_revisar_minutas": "Coordinación · Revisar / aprobar Minutas",
-    "coord_revisar_recetas": "Coordinación · Revisar / aprobar Recetas",
+    "coord_revisar_minutas": "PROPUESTA ETAPA POSTERIOR · Coordinación · Revisar Minutas",
+    "coord_revisar_recetas": "PROPUESTA ETAPA POSTERIOR · Coordinación · Revisar Recetas",
 }
 
 def _render_encuestas_portal(conn, token, referencia, rut, institucion):
@@ -2183,7 +2183,7 @@ def render_coordinacion():
 
 def render_casino():
     usuario = st.session_state.usuario
-    roles_casino = ["Cocina", "Finanzas", "Bodega", "Coordinacion"]
+    roles_casino = ["Cocina", "Finanzas", "Bodega"]
     if usuario and usuario.get("rol") in roles_casino:
         rol = str(usuario["rol"])
         st.markdown(f'<div class="al-card"><h3>{"Coordinación" if rol=="Coordinacion" else rol}</h3><p>¡Buen día, {usuario.get("nombre") or "equipo"}! Hoy es {datetime.now().strftime("%d/%m/%Y")}. Que tengan una excelente jornada.</p></div>', unsafe_allow_html=True)
@@ -3201,8 +3201,9 @@ def render_casino():
 
 def render_admin():
     if st.session_state.usuario and st.session_state.usuario["rol"] in ["AdminTotal","AdminCasino","Operaciones","Gerencia","Bodega"]:
-        st.markdown(f'<div class="al-card"><h3>🏢 Administración y Control de Gestión</h3><p>Información consolidada para la gestión operativa y financiera.</p></div>', unsafe_allow_html=True)
         rol_admin = str(st.session_state.usuario.get("rol", ""))
+        nombre_perfil = {"AdminCasino":"Administrador de Casino","AdminTotal":"Administrador Total"}.get(rol_admin, rol_admin)
+        st.markdown(f'<div class="al-card"><h3>Hola, bienvenido/a</h3><p><b>Perfil: {nombre_perfil}</b></p></div>', unsafe_allow_html=True)
         usuario_admin = st.session_state.usuario.get("username")
         mapa_modulos = [
             ("📈 Dashboard","ver_dashboard",True),
@@ -3222,6 +3223,11 @@ def render_admin():
         elif rol_admin == "AdminTotal":
             modulos_admin=[m for m,_,_ in mapa_modulos]
             modulos_admin += ["🏦 Datos transferencia","👥 Usuarios","🧭 Actividad","🧹 Depuración","🛡️ Respaldo"]
+        elif rol_admin == "AdminCasino":
+            # Perfil operacional base. Estos módulos forman parte natural del cargo;
+            # las capacidades sensibles dentro de cada módulo siguen validando permisos.
+            base_casino={"📈 Dashboard","📊 Reportes","📋 Planilla de Reservas","📦 Inventario y Bodega","🍽️ Minutas","⭐ Satisfacción","⚖️ Excepciones","🏢 Instituciones"}
+            modulos_admin=[m for m,_,_ in mapa_modulos if m in base_casino]
         else:
             modulos_admin=[m for m,p,d in mapa_modulos if permiso_habilitado(usuario_admin,p,d)]
         if not modulos_admin:
@@ -3251,6 +3257,39 @@ def render_admin():
             with c1: st.metric("Total registros pendientes", len(df_pend))
             with c2: st.metric("Monto total pendiente", formato_clp(df_pend['precio_aplicado'].sum() if not df_pend.empty else 0))
             st.download_button("📥 Descargar Pagos Pendientes CSV", df_pend.to_csv(index=False).encode('utf-8'), "pagos_pendientes.csv", "text/csv")
+
+            # CIERRE-39: conciliación simple de comensales y pagos, con histórico de pagados.
+            st.markdown("#### Comensales y estado de pago")
+            df_conc = conn.query("""
+                SELECT s.referencia_reserva, MIN(s.fecha) AS fecha, s.rut, MAX(c.nombre) AS nombre,
+                       MAX(c.institucion) AS institucion, SUM(COALESCE(s.precio_aplicado,0)) AS monto,
+                       MAX(COALESCE(s.estado_pago,'Pendiente')) AS estado_pago
+                FROM solicitudes s LEFT JOIN comensales c ON c.rut=s.rut
+                WHERE COALESCE(s.tipo_registro,'RESERVA_COMERCIAL') <> 'CONSUMO_INTERNO'
+                GROUP BY s.referencia_reserva,s.rut ORDER BY MIN(s.fecha) DESC
+            """, ttl=0)
+            if not df_conc.empty:
+                estados = df_conc['estado_pago'].fillna('Pendiente').astype(str)
+                pag = df_conc[estados.str.lower().eq('pagado')]
+                pend = df_conc[~estados.str.lower().eq('pagado')]
+                k1,k2,k3,k4=st.columns(4)
+                k1.metric("Reservas",len(df_conc)); k2.metric("Pagadas",len(pag)); k3.metric("Por cobrar",len(pend)); k4.metric("Valorización",formato_clp(df_conc['monto'].sum()))
+                vista_conc=df_conc[['nombre','institucion','fecha','estado_pago','monto']].rename(columns={'nombre':'Comensal','institucion':'Institución','fecha':'Fecha','estado_pago':'Estado','monto':'Monto'})
+                st.dataframe(vista_conc,use_container_width=True,hide_index=True)
+                st.download_button("⬇️ Exportar conciliación CSV",df_conc.to_csv(index=False).encode('utf-8'),"alemsi_conciliacion_pagos.csv","text/csv",use_container_width=True)
+                with st.expander("Pagos ya validados"):
+                    st.dataframe(pag[['nombre','institucion','fecha','monto','referencia_reserva']].rename(columns={'nombre':'Comensal','institucion':'Institución','fecha':'Fecha','monto':'Monto','referencia_reserva':'Referencia'}),use_container_width=True,hide_index=True)
+
+            st.markdown("#### Ranking de platos solicitados")
+            df_rank = conn.query("""
+                WITH base AS (SELECT DISTINCT ON (rut,fecha,servicio) rut,fecha,servicio,plato_reservado FROM solicitudes
+                WHERE COALESCE(plato_reservado,'')<>'' ORDER BY rut,fecha,servicio,id DESC)
+                SELECT plato_reservado AS plato, servicio, COUNT(*) AS reservas FROM base
+                GROUP BY plato_reservado,servicio ORDER BY reservas DESC,plato_reservado
+            """,ttl=0)
+            if not df_rank.empty:
+                st.dataframe(df_rank.rename(columns={'plato':'Plato','servicio':'Servicio','reservas':'Reservas'}),use_container_width=True,hide_index=True)
+                st.caption(f"Más solicitado: {df_rank.iloc[0]['plato']} · {int(df_rank.iloc[0]['reservas'])} reserva(s). Menos solicitado: {df_rank.iloc[-1]['plato']} · {int(df_rank.iloc[-1]['reservas'])} reserva(s).")
 
             st.divider()
 
@@ -4021,7 +4060,7 @@ def render_admin():
                         nn = st.text_input("Nombre*")
                         ne = st.text_input("Correo de recuperación*")
                     with c2:
-                        nr = st.selectbox("Rol*", ["Cocina","Finanzas","Gerencia","AdminCasino","Bodega","Coordinacion","AdminTotal"])
+                        nr = st.selectbox("Rol*", ["Cocina","Finanzas","Gerencia","AdminCasino","Bodega","AdminTotal"])
                         st.info("La APP generará una contraseña temporal y enviará el acceso al correo registrado.")
                     crear = st.form_submit_button("Crear usuario y enviar acceso", type="primary", use_container_width=True)
                 if crear:
@@ -4055,7 +4094,7 @@ def render_admin():
                     with c1:
                         nombre_n = st.text_input("Nombre", value=str(rowu['nombre'] or ''))
                         correo_n = st.text_input("Correo de recuperación", value=str(rowu.get('correo') or ''))
-                        roles = ["Cocina","Finanzas","Gerencia","AdminCasino","Bodega","Coordinacion","AdminTotal"]
+                        roles = ["Cocina","Finanzas","Gerencia","AdminCasino","Bodega","AdminTotal"]
                         rol_actual = str(rowu['rol']) if str(rowu['rol']) in roles else "Cocina"
                         rol_n = st.selectbox("Rol", roles, index=roles.index(rol_actual))
                     with c2:
