@@ -164,3 +164,17 @@
 - Reportes: conciliación de comensales/estado de pago, histórico de pagados y ranking de platos.
 - Coordinación queda identificada como propuesta de etapa posterior y no como rol habilitable en esta entrega.
 - Se mantiene la arquitectura de Bodega/Inventario como expansión posterior; no se presenta como alcance operativo cerrado.
+
+## v2.1.3.40 — Hotfix Dashboard corporativo único
+- Dashboard convertido en componente transversal único para todos los perfiles autorizados.
+- Finanzas deja de utilizar un "Dashboard de Finanzas" independiente.
+- Gerencia deja de utilizar una variante propia de Dashboard.
+- AdminTotal, AdminCasino, Finanzas y Gerencia consumen la misma función, consultas, indicadores y orden visual.
+- Orden único: Resumen general → Estado por institución → Próximas reservas 14 días → Tendencia → Demanda por servicio → Ranking ejecutivo de platos → Satisfacción.
+- El acceso se controla por rol/permisos; el contenido base no cambia según el cargo.
+- Corrección de compatibilidad Streamlit Cloud: `selector_neutro` ya no pasa `format_func=None` a `st.selectbox`, eliminando el `TypeError` observado en Gerencia.
+
+## v2.1.3.40 — Hotfix selector neutro (17/08/2026)
+- Compatibilidad Streamlit 1.61.x: `selector_neutro` omite `format_func` cuando no es una función callable.
+- Mantiene selección neutra (`index=None`) y placeholder `— Seleccione —`.
+- Sin cambios de esquema ni limpieza de datos.

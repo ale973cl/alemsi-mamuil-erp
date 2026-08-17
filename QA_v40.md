@@ -66,3 +66,26 @@ Resultado del modelo estático:
 5. Probar permisos con al menos AdminTotal, AdminCasino, Finanzas, Cocina, Gerencia y Bodega.
 6. Verificar autoscroll en móvil y escritorio.
 7. Revisar PDFs Carta en impresión real e incorporar/confirmar el archivo gráfico oficial del logo ALEMSI si se exige coincidencia exacta con papelería corporativa.
+
+## Hotfix de arquitectura de Dashboard — validación posterior a prueba móvil
+
+Hallazgo real en Streamlit Cloud: Gerencia generó `TypeError` al abrir el selector neutro porque la versión desplegada de Streamlit intentaba ejecutar `format_func=None`.
+
+- **DETECTADO:** error reproducido por traceback real en Gerencia.
+- **CORREGIDO EN CÓDIGO:** `selector_neutro()` solo envía `format_func` cuando es callable.
+- **VALIDADO ESTÁTICAMENTE:** `py_compile` y AST aprobados.
+- **PENDIENTE PRUEBA REAL:** confirmar navegación del selector en Streamlit Cloud móvil/escritorio.
+
+Regla de arquitectura confirmada por el usuario: el Dashboard no pertenece a Gerencia ni a Finanzas. Es un componente corporativo único.
+
+- **CORREGIDO EN CÓDIGO:** se creó `_render_dashboard_integral_alemsi()` como única implementación activa de Dashboard.
+- Finanzas, AdminTotal, AdminCasino y Gerencia llaman al mismo componente cuando tienen acceso al Dashboard.
+- Bodega/u otros perfiles pueden acceder al mismo componente únicamente mediante permiso extraordinario `ver_dashboard`; no existe una variante por rol.
+- El Dashboard conserva exactamente el mismo orden: Resumen general → Estado por institución → Próximas reservas 14 días → Tendencia → Demanda por servicio → Ranking de platos → Satisfacción (si existen respuestas).
+- El Dashboard no muestra RUT, nombres ni comprobantes individuales.
+- Las diferencias entre perfiles quedan en módulos operativos separados, no en el Dashboard.
+
+## Hotfix de estabilización — 17/08/2026
+- Corregido en código: `selector_neutro()` ya no envía `format_func=None` a `st.selectbox`, evitando el TypeError observado en Finanzas/Gerencia con Streamlit 1.61.x.
+- Validado estáticamente: `python -m py_compile streamlit_app.py common.py` sin errores.
+- Pendiente de prueba real: despliegue Streamlit Cloud, conexión Supabase/PostgreSQL, navegación Finanzas → Por institución, Gerencia y SMTP.
