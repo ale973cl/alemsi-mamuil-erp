@@ -2500,6 +2500,21 @@ def _asegurar_revision_coordinacion():
                 fecha_accion TEXT, estado TEXT DEFAULT 'Pendiente'
             )
         """)
+        execute_sql(ses, """
+            CREATE TABLE IF NOT EXISTS minuta_flujo_coordinacion (
+                id SERIAL PRIMARY KEY,
+                fecha_desde TEXT NOT NULL,
+                fecha_hasta TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                estado TEXT NOT NULL DEFAULT 'EN_REVISION',
+                observacion TEXT,
+                enviado_por TEXT,
+                enviado_at TEXT,
+                coordinador TEXT,
+                coordinacion_at TEXT,
+                activo INTEGER DEFAULT 1
+            )
+        """)
         ses.commit()
 
 
@@ -2623,127 +2638,377 @@ def _render_reporte_produccion_fecha(fecha_iso, titulo=True, mostrar_nominal=Tru
     return df_prod, df_alemsi
 
 
-def render_coordinacion():
-    _asegurar_revision_coordinacion(); _sincronizar_maestro_platos()
-    conn=get_conn(); usuario=st.session_state.usuario
-    st.markdown("### 🤝 Coordinación")
-    st.caption("Acceso privado de revisión. Coordinación no modifica directamente Minutas ni Recetas oficiales.")
-    vistas=[]
-    if permiso_habilitado(usuario.get("username"),"coord_revisar_minutas",True): vistas.append("🍽️ Revisar Minutas")
-    if permiso_habilitado(usuario.get("username"),"coord_revisar_recetas",True): vistas.append("📖 Revisar Recetas")
-    if permiso_habilitado(usuario.get("username"),"ver_satisfaccion",False): vistas.append("⭐ Satisfacción")
-    if not vistas:
-        st.warning("Tu perfil no tiene funciones de Coordinación habilitadas. Contacta a AdminTotal."); return
-    vista=st.radio("Función",vistas,horizontal=True,key="coord_vista",label_visibility="collapsed")
-    if vista=="⭐ Satisfacción":
-        _render_satisfaccion_gestion(usuario,key_prefix="coord_sat"); return
-    if vista=="📖 Revisar Recetas":
-        st.markdown("#### 📖 Revisión de Recetas")
-        recetas=conn.query("""
-            SELECT plato,MAX(COALESCE(version,1)) AS version_receta,
-                   MAX(COALESCE(estado,'BORRADOR')) AS estado_receta
-            FROM recetas WHERE TRIM(COALESCE(plato,''))<>''
-            GROUP BY plato ORDER BY plato
-        """,ttl=0)
-        if recetas.empty:
-            st.info("No existen recetas cargadas para revisar."); return
-        hist_r=conn.query("SELECT plato,version_receta,accion,observacion,fecha_accion,estado FROM receta_revision_coordinacion WHERE usuario=:u ORDER BY fecha_accion DESC,id DESC",params={"u":str(usuario.get("username"))},ttl=0)
-        if not hist_r.empty:
-            pend_r=hist_r[hist_r["accion"].astype(str)=="OBSERVAR"].copy()
-            if not pend_r.empty:
-                with st.expander(f"📝 Mis recetas observadas · {len(pend_r)}",expanded=True):
-                    st.dataframe(_tabla_visible(pend_r,{"plato":"Plato","version_receta":"Versión","accion":"Acción","observacion":"Observación","fecha_accion":"Fecha / hora","estado":"Estado"},["fecha_accion"]),use_container_width=True,hide_index=True)
-        plato_r=st.selectbox("Plato / receta",recetas["plato"].astype(str).tolist(),key="coord_receta_plato")
-        cab=recetas[recetas["plato"].astype(str)==plato_r].iloc[0]
-        det=conn.query("SELECT insumo,cantidad,unidad,instrucciones,estado,version,merma_pct,margen_produccion_pct FROM recetas WHERE plato=:p ORDER BY insumo",params={"p":plato_r},ttl=0)
-        st.caption(f"Versión {int(cab['version_receta'] or 1)} · Estado receta: {cab['estado_receta']}")
-        st.dataframe(det.rename(columns={"insumo":"Insumo","cantidad":"Cantidad","unidad":"Unidad","instrucciones":"Instrucciones","estado":"Estado","version":"Versión","merma_pct":"Merma %","margen_produccion_pct":"Margen producción %"}),use_container_width=True,hide_index=True)
-        accion_r=st.radio("Decisión",["APROBAR","OBSERVAR"],horizontal=True,key="coord_receta_accion")
-        obs_r=st.text_area("Comentario / observación",key="coord_receta_obs",placeholder="Si observas la receta, indica exactamente qué debe revisarse.")
-        if st.button("Guardar revisión de receta",type="primary",use_container_width=True,key="coord_receta_guardar"):
-            if accion_r=="OBSERVAR" and not obs_r.strip():
-                st.error("La observación es obligatoria cuando la receta no se aprueba.")
-            else:
-                with conn.session as ses:
-                    execute_sql(ses,"INSERT INTO receta_revision_coordinacion (plato,version_receta,accion,observacion,usuario,fecha_accion,estado) VALUES (%s,%s,%s,%s,%s,%s,%s)",(plato_r,int(cab['version_receta'] or 1),accion_r,obs_r.strip(),str(usuario.get('username')),datetime.now().isoformat(),'Aprobado' if accion_r=='APROBAR' else 'Pendiente'))
-                    ses.commit()
-                registrar_auditoria(usuario.get('username'),'REVISION_RECETA_COORDINACION','recetas',plato_r,str(cab['estado_receta']),accion_r,obs_r.strip())
-                st.success("Revisión registrada. La receta oficial no fue modificada."); st.rerun()
-        return
-    st.markdown("#### 🍽️ Revisión de Minutas")
-    st.caption("Puedes recorrer el mes completo o elegir un día. Aprobar, observar o proponer cambio no modifica la minuta oficial.")
-    mes=st.date_input("Mes a revisar", value=date.today().replace(day=1), key="coord_mes")
-    ini=mes.replace(day=1); fin=(ini+timedelta(days=32)).replace(day=1)-timedelta(days=1)
-    df=conn.query("SELECT fecha,servicio,tipo_opcion,plato FROM minutas WHERE activo=1 AND fecha>=:i AND fecha<=:f ORDER BY fecha,servicio,tipo_opcion",params={"i":ini.isoformat(),"f":fin.isoformat()},ttl=0)
-    if df.empty:
-        st.info("No hay minutas cargadas para este período."); return
 
-    # COORD-35: panel personal con la última observación/propuesta por día/servicio/opción.
+def _flujo_minuta_actual(fecha_desde, fecha_hasta):
+    _asegurar_revision_coordinacion()
+    try:
+        return get_conn().query(
+            """
+            SELECT id,fecha_desde,fecha_hasta,version,estado,observacion,
+                   enviado_por,enviado_at,coordinador,coordinacion_at,activo
+            FROM minuta_flujo_coordinacion
+            WHERE fecha_desde=:i AND fecha_hasta=:f AND COALESCE(activo,1)=1
+            ORDER BY version DESC,id DESC
+            LIMIT 1
+            """,
+            params={"i": str(fecha_desde), "f": str(fecha_hasta)}, ttl=0
+        )
+    except Exception:
+        return pd.DataFrame()
+
+
+def _invalidar_autorizacion_minuta(fecha_iso, usuario, motivo):
+    """Una edición posterior invalida autorización/revisión que cubra esa fecha."""
+    _asegurar_revision_coordinacion()
+    conn = get_conn()
+    with conn.session as ses:
+        execute_sql(
+            ses,
+            """
+            UPDATE minuta_flujo_coordinacion
+            SET estado='REQUIERE_REVALIDACION',
+                observacion=CASE
+                    WHEN COALESCE(observacion,'')='' THEN %s
+                    ELSE observacion || ' | ' || %s
+                END
+            WHERE COALESCE(activo,1)=1
+              AND fecha_desde<=%s AND fecha_hasta>=%s
+              AND estado IN ('EN_REVISION','AUTORIZADA')
+            """,
+            (motivo, motivo, str(fecha_iso), str(fecha_iso))
+        )
+        ses.commit()
+    registrar_auditoria(
+        usuario, "INVALIDAR_AUTORIZACION_MINUTA", "minuta_flujo_coordinacion",
+        str(fecha_iso), "EN_REVISION/AUTORIZADA", "REQUIERE_REVALIDACION", motivo
+    )
+
+
+
+def _correos_rol_y_config(tipo_config, rol):
+    """Combina configuración de correos existente + correos de usuarios activos del rol."""
+    destinos = []
+    try:
+        destinos.extend(get_correos(tipo_config))
+    except Exception:
+        pass
+    try:
+        df = get_conn().query(
+            "SELECT correo FROM usuarios WHERE COALESCE(activo,1)=1 AND rol=:rol AND COALESCE(correo,'')<>'' ORDER BY username",
+            params={"rol": rol}, ttl=0,
+        )
+        if not df.empty:
+            destinos.extend(df['correo'].dropna().astype(str).str.strip().tolist())
+    except Exception:
+        pass
+    salida=[]
+    vistos=set()
+    for d in destinos:
+        d=str(d or '').strip().lower()
+        if d and '@' in d and d not in vistos:
+            vistos.add(d); salida.append(d)
+    return salida
+
+
+def _notificar_flujo_coordinacion(destino_tipo, asunto, html, entidad, entidad_id, usuario, detalle):
+    """Notifica sin revertir la acción operacional si SMTP falla."""
+    rol = 'Coordinacion' if destino_tipo == 'coordinacion' else 'AdminCasino'
+    enviados=0; fallos=[]
+    for correo in _correos_rol_y_config(destino_tipo, rol):
+        try:
+            ok, msg = enviar_email(correo, asunto, html)
+        except Exception as exc:
+            ok, msg = False, str(exc)
+        if ok:
+            enviados += 1
+        else:
+            fallos.append(f'{correo}: {msg}')
+    estado = f'Enviados={enviados}' + (f'; Fallos={len(fallos)}' if fallos else '')
+    registrar_auditoria(
+        usuario, 'NOTIFICACION_COORDINACION', entidad, str(entidad_id), '', estado,
+        detalle + ((' | ' + '; '.join(fallos[:5])) if fallos else '')
+    )
+    return enviados, fallos
+
+
+def _enviar_minuta_coordinacion(fecha_desde, fecha_hasta, usuario):
+    """Crea una nueva versión de revisión sin borrar ninguna anterior."""
+    _asegurar_revision_coordinacion()
+    conn = get_conn()
+    actual = _flujo_minuta_actual(fecha_desde, fecha_hasta)
+    version = 1
+    if not actual.empty:
+        version = int(actual.iloc[0].get("version") or 0) + 1
+    ahora = datetime.now().isoformat()
+    with conn.session as ses:
+        execute_sql(
+            ses,
+            """
+            INSERT INTO minuta_flujo_coordinacion
+            (fecha_desde,fecha_hasta,version,estado,observacion,enviado_por,enviado_at,activo)
+            VALUES (%s,%s,%s,'EN_REVISION','',%s,%s,1)
+            """,
+            (str(fecha_desde), str(fecha_hasta), version, str(usuario), ahora)
+        )
+        ses.commit()
+    registrar_auditoria(
+        usuario, "ENVIAR_MINUTA_COORDINACION", "minuta_flujo_coordinacion",
+        f"{fecha_desde}..{fecha_hasta}", "", f"EN_REVISION v{version}",
+        "Envío formal a Coordinación"
+    )
+    asunto = f"[ALEMSI] Minuta disponible para revisión · v{version}"
+    html = f"""
+    <div style='font-family:Arial,sans-serif;max-width:680px;margin:auto;border:1px solid #d7e2dc;border-radius:14px;padding:22px'>
+      <h2 style='color:#0A2F6B'>Minuta disponible para revisión</h2>
+      <p>Administración Casino envió una propuesta de minuta a Coordinación.</p>
+      <p><b>Período:</b> {fecha_visible(fecha_desde)} → {fecha_visible(fecha_hasta)}<br>
+         <b>Versión:</b> {version}<br><b>Enviada por:</b> {usuario}</p>
+      <p>Ingresa a ALEMSI con tu usuario de Coordinación para revisar y <b>Autorizar</b> u <b>Observar</b>.</p>
+    </div>
+    """
+    _notificar_flujo_coordinacion('coordinacion', asunto, html, 'minuta_flujo_coordinacion', f'{fecha_desde}..{fecha_hasta}', usuario, f'Envío a Coordinación v{version}')
+    return version
+
+
+def _estado_flujo_label(estado):
+    mapa = {
+        "EN_REVISION": "🟡 En revisión",
+        "OBSERVADA": "🟠 Observada",
+        "AUTORIZADA": "🟢 Autorizada",
+        "PUBLICADA": "🔵 Publicada",
+        "REQUIERE_REVALIDACION": "🔴 Requiere revalidación",
+    }
+    return mapa.get(str(estado or "").upper(), str(estado or "Sin envío"))
+
+
+def _render_estado_coordinacion_admin(ini, fin):
+    """Panel visible para AdminCasino dentro de Minutas."""
+    _asegurar_revision_coordinacion()
+    conn = get_conn()
+    actual = _flujo_minuta_actual(ini.isoformat(), fin.isoformat())
+    st.markdown("##### 🤝 Minutas en revisión por Coordinación")
+    if actual.empty:
+        st.info("Este período todavía no ha sido enviado a Coordinación.")
+    else:
+        r = actual.iloc[0]
+        st.markdown(
+            f"**Estado:** {_estado_flujo_label(r.get('estado'))} · "
+            f"**Versión:** {int(r.get('version') or 1)}"
+        )
+        if str(r.get("observacion") or "").strip():
+            st.warning(f"Observación de Coordinación: {r.get('observacion')}")
+        meta = []
+        if str(r.get("enviado_por") or "").strip():
+            meta.append(f"Enviado por {r.get('enviado_por')}")
+        if str(r.get("enviado_at") or "").strip():
+            meta.append(f"Envío: {str(r.get('enviado_at'))[:16].replace('T',' ')}")
+        if str(r.get("coordinador") or "").strip():
+            meta.append(f"Coordinador: {r.get('coordinador')}")
+        if str(r.get("coordinacion_at") or "").strip():
+            meta.append(f"Revisión: {str(r.get('coordinacion_at'))[:16].replace('T',' ')}")
+        if meta:
+            st.caption(" · ".join(meta))
+
+    hist = conn.query(
+        """
+        SELECT version,estado,observacion,enviado_por,enviado_at,coordinador,coordinacion_at
+        FROM minuta_flujo_coordinacion
+        WHERE fecha_desde=:i AND fecha_hasta=:f
+        ORDER BY version DESC,id DESC
+        """,
+        params={"i":ini.isoformat(),"f":fin.isoformat()}, ttl=0
+    )
+    if not hist.empty:
+        with st.expander("Historial de revisión por Coordinación", expanded=False):
+            hv = hist.copy()
+            hv["estado"] = hv["estado"].apply(_estado_flujo_label)
+            st.dataframe(
+                hv.rename(columns={
+                    "version":"Versión","estado":"Estado","observacion":"Observación",
+                    "enviado_por":"Enviado por","enviado_at":"Fecha envío",
+                    "coordinador":"Coordinador","coordinacion_at":"Fecha revisión"
+                }),
+                use_container_width=True, hide_index=True
+            )
+
+
+def render_coordinacion():
+    """Perfil exclusivo: visar, observar y autorizar minutas."""
+    _asegurar_revision_coordinacion()
+    conn = get_conn()
+    usuario = st.session_state.usuario
+
+    st.markdown("### 🤝 Coordinación · Revisión de Minutas")
+    st.caption(
+        "Coordinación solo revisa la propuesta de minuta. "
+        "No modifica platos, recetas, producción, bodega ni finanzas."
+    )
+
     pendientes = conn.query(
         """
-        SELECT DISTINCT ON (r.fecha,r.servicio,r.tipo_opcion)
-               r.fecha,r.servicio,r.tipo_opcion,r.plato_actual,r.accion,r.observacion,r.plato_propuesto,r.fecha_accion,r.estado,
-               m.plato AS plato_actual_minuta
-        FROM minuta_revision_coordinacion r
-        LEFT JOIN minutas m ON m.fecha=r.fecha AND m.servicio=r.servicio AND m.tipo_opcion=r.tipo_opcion AND m.activo=1
-        WHERE r.usuario=:u AND r.fecha>=:i AND r.fecha<=:f
-        ORDER BY r.fecha,r.servicio,r.tipo_opcion,r.fecha_accion DESC,r.id DESC
-        """,
-        params={"u":str(usuario.get("username")),"i":ini.isoformat(),"f":fin.isoformat()}, ttl=0
+        SELECT id,fecha_desde,fecha_hasta,version,estado,observacion,
+               enviado_por,enviado_at
+        FROM minuta_flujo_coordinacion
+        WHERE COALESCE(activo,1)=1 AND estado='EN_REVISION'
+        ORDER BY enviado_at DESC,id DESC
+        """, ttl=0
     )
-    if not pendientes.empty:
-        pendientes = pendientes[pendientes["accion"].astype(str)!="APROBAR"].copy()
-        if not pendientes.empty:
-            pendientes["Estado revisión"] = pendientes.apply(
-                lambda r: "Corregido · pendiente nueva aprobación"
-                if str(r.get("plato_actual_minuta") or "").strip() and str(r.get("plato_actual_minuta") or "").strip() != str(r.get("plato_actual") or "").strip()
-                else "Pendiente de corrección", axis=1
+
+    if pendientes.empty:
+        st.success("No hay minutas pendientes de revisión.")
+    else:
+        ids = pendientes["id"].astype(int).tolist()
+        flujo_id = selector_neutro(
+            "Minuta pendiente de revisión",
+            ids,
+            format_func=lambda x: (
+                f"{pendientes[pendientes['id'].astype(int)==int(x)].iloc[0]['fecha_desde']} → "
+                f"{pendientes[pendientes['id'].astype(int)==int(x)].iloc[0]['fecha_hasta']} · "
+                f"v{int(pendientes[pendientes['id'].astype(int)==int(x)].iloc[0]['version'])}"
+            ),
+            key="coord_flujo_minuta"
+        )
+        if flujo_id is None:
+            st.info("Selecciona una minuta para revisarla.")
+        else:
+            flujo = pendientes[pendientes["id"].astype(int)==int(flujo_id)].iloc[0]
+            ini = str(flujo["fecha_desde"])
+            fin = str(flujo["fecha_hasta"])
+            st.markdown(
+                f"#### Propuesta {fecha_visible(ini)} → {fecha_visible(fin)} "
+                f"· versión {int(flujo['version'])}"
             )
-            with st.expander(f"📝 Mis días observados / pendientes · {len(pendientes)}", expanded=True):
-                st.dataframe(
-                    pendientes[["fecha","servicio","tipo_opcion","plato_actual","plato_actual_minuta","accion","observacion","plato_propuesto","Estado revisión","fecha_accion"]].rename(columns={
-                        "fecha":"Fecha","servicio":"Servicio","tipo_opcion":"Opción","plato_actual":"Plato observado",
-                        "plato_actual_minuta":"Plato vigente","accion":"Acción","observacion":"Observación",
-                        "plato_propuesto":"Propuesta","fecha_accion":"Fecha / hora"
-                    }), use_container_width=True, hide_index=True
+            st.caption(
+                f"Enviada por {flujo.get('enviado_por') or 'AdminCasino'} "
+                f"· {str(flujo.get('enviado_at') or '')[:16].replace('T',' ')}"
+            )
+
+            df = conn.query(
+                """
+                SELECT fecha,servicio,tipo_opcion,plato,
+                       COALESCE(estado,'BORRADOR') AS estado
+                FROM minutas
+                WHERE COALESCE(activo,1)=1 AND fecha>=:i AND fecha<=:f
+                ORDER BY fecha,
+                    CASE servicio WHEN 'Desayuno' THEN 1 WHEN 'Almuerzo' THEN 2
+                                  WHEN 'Once' THEN 3 WHEN 'Cena' THEN 4 ELSE 5 END,
+                    tipo_opcion,plato
+                """,
+                params={"i":ini,"f":fin}, ttl=0
+            )
+            if df.empty:
+                st.error("La propuesta no contiene minutas activas en este período.")
+            else:
+                for fecha_d in sorted(df["fecha"].astype(str).unique().tolist()):
+                    d = df[df["fecha"].astype(str)==fecha_d].copy()
+                    st.markdown(f"##### {fecha_visible(fecha_d)}")
+                    st.dataframe(
+                        d[["servicio","tipo_opcion","plato"]].rename(columns={
+                            "servicio":"Servicio","tipo_opcion":"Opción","plato":"Plato"
+                        }),
+                        use_container_width=True, hide_index=True
+                    )
+
+                alertas = _alertas_preventivas_minuta(df)
+                if alertas:
+                    st.warning("La revisión preventiva detectó aspectos que conviene verificar:")
+                    for alerta in alertas:
+                        st.caption(f"• {alerta}")
+
+                decision = st.radio(
+                    "Decisión de Coordinación",
+                    ["AUTORIZAR","OBSERVAR"],
+                    horizontal=True,
+                    key=f"coord_decision_{flujo_id}"
+                )
+                observacion = st.text_area(
+                    "Observación para Administración Casino",
+                    key=f"coord_observacion_{flujo_id}",
+                    placeholder="Obligatoria si observas la minuta. Indica claramente qué debe revisar Administración Casino."
+                )
+                confirmar = st.checkbox(
+                    "Confirmo que revisé la propuesta completa del período.",
+                    key=f"coord_confirmar_{flujo_id}"
                 )
 
-    alertas=_alertas_preventivas_minuta(df)
-    if alertas:
-        with st.expander(f"⚠️ Revisión preventiva · {len(alertas)} alerta(s)"):
-            for a in alertas: st.warning(a)
-    fechas=sorted(df['fecha'].astype(str).unique().tolist())
-    fecha_sel=st.selectbox("Día",fechas,key="coord_fecha")
-    dia=df[df['fecha'].astype(str)==fecha_sel].copy()
-    st.dataframe(dia.rename(columns={'servicio':'Servicio','tipo_opcion':'Opción','plato':'Plato'}),use_container_width=True,hide_index=True)
-    opciones=[f"{r.servicio} · {r.tipo_opcion} · {r.plato}" for r in dia.itertuples()]
-    elegido=st.selectbox("Preparación a revisar",opciones,key="coord_item")
-    idx=opciones.index(elegido); row=dia.iloc[idx]
-    accion=st.radio("Decisión",["APROBAR","OBSERVAR","PROPONER CAMBIO"],horizontal=True,key="coord_accion")
-    obs=st.text_area("Observación / solicitud",key="coord_obs",placeholder="Indica brevemente qué deseas cambiar o revisar.")
-    platos=conn.query("SELECT nombre FROM platos WHERE COALESCE(activo,1)=1 AND (servicio=:s OR COALESCE(servicio,'')='') ORDER BY nombre",params={'s':str(row['servicio'])},ttl=0)
-    propuesta=""
-    if accion=="PROPONER CAMBIO":
-        lista=['— Seleccionar de la base —'] + (platos['nombre'].dropna().astype(str).drop_duplicates().tolist() if not platos.empty else [])
-        propuesta=st.selectbox("Propuesta desde Maestro de Platos",lista,key="coord_prop")
-        libre=st.text_input("O sugerir otra preparación",key="coord_prop_libre")
-        if libre.strip(): propuesta=libre.strip()
-        elif propuesta.startswith('—'): propuesta=''
-    if st.button("Guardar revisión",type="primary",use_container_width=True,key="coord_guardar"):
-        if accion in ["OBSERVAR","PROPONER CAMBIO"] and not obs.strip():
-            st.error("Escribe la observación o motivo del cambio.")
-        elif accion=="PROPONER CAMBIO" and not propuesta:
-            st.error("Selecciona o escribe una propuesta.")
-        else:
-            with conn.session as ses:
-                execute_sql(ses,"INSERT INTO minuta_revision_coordinacion (fecha,servicio,tipo_opcion,plato_actual,accion,observacion,plato_propuesto,usuario,fecha_accion,estado) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",(fecha_sel,str(row['servicio']),str(row['tipo_opcion']),str(row['plato']),accion,obs.strip(),propuesta,str(usuario.get('username')),datetime.now().isoformat(),'Aprobado' if accion=='APROBAR' else 'Pendiente'))
-                ses.commit()
-            registrar_auditoria(usuario.get('username'),'REVISION_MINUTA_COORDINACION','minuta_revision_coordinacion',fecha_sel,str(row['plato']),propuesta or accion,obs.strip())
-            st.success("Revisión registrada. La minuta oficial no fue modificada."); st.rerun()
-    hist=conn.query("SELECT fecha,servicio,tipo_opcion,plato_actual,accion,observacion,plato_propuesto,usuario,fecha_accion,estado FROM minuta_revision_coordinacion WHERE fecha>=:i AND fecha<=:f ORDER BY fecha_accion DESC",params={'i':ini.isoformat(),'f':fin.isoformat()},ttl=0)
-    if not hist.empty:
-        with st.expander("Historial de revisión"):
-            st.dataframe(hist,use_container_width=True,hide_index=True)
+                if st.button(
+                    "Guardar decisión de Coordinación",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not confirmar,
+                    key=f"coord_guardar_decision_{flujo_id}"
+                ):
+                    if decision=="OBSERVAR" and not observacion.strip():
+                        st.error("Debes indicar la observación antes de devolver la minuta.")
+                    else:
+                        nuevo_estado = "AUTORIZADA" if decision=="AUTORIZAR" else "OBSERVADA"
+                        ahora = datetime.now().isoformat()
+                        with conn.session as ses:
+                            execute_sql(
+                                ses,
+                                """
+                                UPDATE minuta_flujo_coordinacion
+                                SET estado=%s,observacion=%s,coordinador=%s,coordinacion_at=%s
+                                WHERE id=%s
+                                """,
+                                (nuevo_estado, observacion.strip(),
+                                 str(usuario.get("username")), ahora, int(flujo_id))
+                            )
+                            ses.commit()
+                        registrar_auditoria(
+                            usuario.get("username"),
+                            "DECISION_COORDINACION_MINUTA",
+                            "minuta_flujo_coordinacion",
+                            f"{ini}..{fin}",
+                            "EN_REVISION",
+                            nuevo_estado,
+                            observacion.strip()
+                        )
+                        asunto = (
+                            f"[ALEMSI] Minuta autorizada por Coordinación · v{int(flujo['version'])}"
+                            if nuevo_estado=="AUTORIZADA" else
+                            f"[ALEMSI] Minuta observada por Coordinación · v{int(flujo['version'])}"
+                        )
+                        html = f"""
+                        <div style='font-family:Arial,sans-serif;max-width:680px;margin:auto;border:1px solid #d7e2dc;border-radius:14px;padding:22px'>
+                          <h2 style='color:#0A2F6B'>Resultado de revisión de minuta</h2>
+                          <p><b>Período:</b> {fecha_visible(ini)} → {fecha_visible(fin)}<br>
+                             <b>Versión:</b> {int(flujo['version'])}<br>
+                             <b>Resultado:</b> {nuevo_estado}</p>
+                          <p><b>Observación:</b> {observacion.strip() or 'Sin observaciones'}</p>
+                          <p>{'La minuta ya puede ser publicada por Administración Casino.' if nuevo_estado=='AUTORIZADA' else 'Administración Casino debe corregir la minuta y reenviarla a Coordinación.'}</p>
+                        </div>
+                        """
+                        _notificar_flujo_coordinacion('admin_casino', asunto, html, 'minuta_flujo_coordinacion', flujo_id, usuario.get('username'), f'Decisión {nuevo_estado} v{int(flujo["version"])}')
+                        if nuevo_estado=="AUTORIZADA":
+                            st.success("Minuta autorizada. Administración Casino ya puede publicarla.")
+                        else:
+                            st.warning("Minuta observada y devuelta a Administración Casino para corrección.")
+                        st.rerun()
+
+    st.divider()
+    st.markdown("#### Historial de revisiones")
+    historial = conn.query(
+        """
+        SELECT fecha_desde,fecha_hasta,version,estado,observacion,
+               enviado_por,enviado_at,coordinador,coordinacion_at
+        FROM minuta_flujo_coordinacion
+        ORDER BY id DESC LIMIT 100
+        """, ttl=0
+    )
+    if historial.empty:
+        st.caption("Sin revisiones registradas.")
+    else:
+        historial["estado"] = historial["estado"].apply(_estado_flujo_label)
+        st.dataframe(
+            historial.rename(columns={
+                "fecha_desde":"Desde","fecha_hasta":"Hasta","version":"Versión",
+                "estado":"Estado","observacion":"Observación","enviado_por":"Enviado por",
+                "enviado_at":"Fecha envío","coordinador":"Coordinador",
+                "coordinacion_at":"Fecha revisión"
+            }),
+            use_container_width=True, hide_index=True
+        )
 
 
 def generar_pdf_jornada_alemsi(fecha_iso, df_prod, df_alemsi):
@@ -2814,7 +3079,7 @@ def generar_pdf_tabla_alemsi(titulo, periodo, df, columnas=None, total_texto="")
 
 def render_casino():
     usuario = st.session_state.usuario
-    roles_casino = ["Cocina", "Finanzas", "Bodega"]
+    roles_casino = ["Cocina", "Finanzas", "Bodega", "Coordinacion"]
     if usuario and usuario.get("rol") in roles_casino:
         rol = str(usuario["rol"])
         st.markdown(f'<div class="al-card"><h3>{"Coordinación" if rol=="Coordinacion" else rol}</h3><p>¡Buen día, {usuario.get("nombre") or "equipo"}! Hoy es {datetime.now().strftime("%d/%m/%Y")}. Que tengan una excelente jornada.</p></div>', unsafe_allow_html=True)
@@ -4315,22 +4580,117 @@ def render_admin():
                         st.error("Conflicto de minuta: Opción 1 y Opción 2 repiten el mismo plato. Debe corregirse antes de publicar.")
                         st.dataframe(pd.DataFrame(conflictos),use_container_width=True,hide_index=True)
                     else:
-                        ab1,ab2=st.columns(2)
+                        _asegurar_revision_coordinacion()
+                        _render_estado_coordinacion_admin(ini, fin)
+
+                        actual_coord = _flujo_minuta_actual(ini.isoformat(), fin.isoformat())
+                        estado_coord = str(actual_coord.iloc[0].get("estado") or "") if not actual_coord.empty else ""
+
+                        ab1,ab2,ab3=st.columns(3)
                         with ab1:
                             if st.button("🔎 Auditar período",use_container_width=True,key="auditar_minuta_periodo"):
                                 with conn.session as ses:
-                                    execute_sql(ses,"UPDATE minutas SET estado='AUDITADA' WHERE activo=1 AND fecha>=%s AND fecha<=%s AND COALESCE(estado,'PUBLICABLE')='BORRADOR'",(ini.isoformat(),fin.isoformat()))
+                                    execute_sql(
+                                        ses,
+                                        "UPDATE minutas SET estado='AUDITADA' "
+                                        "WHERE activo=1 AND fecha>=%s AND fecha<=%s "
+                                        "AND COALESCE(estado,'PUBLICABLE')='BORRADOR'",
+                                        (ini.isoformat(),fin.isoformat())
+                                    )
                                     ses.commit()
-                                registrar_auditoria(st.session_state.usuario.get('username'),'AUDITAR_MINUTA','minutas',f"{ini.isoformat()}..{fin.isoformat()}",'BORRADOR','AUDITADA','Sin conflictos Opción 1/Opción 2')
-                                st.session_state["_flash_minuta"]="✅ Minuta auditada sin conflictos."; st.rerun()
+                                registrar_auditoria(
+                                    st.session_state.usuario.get('username'),
+                                    'AUDITAR_MINUTA','minutas',
+                                    f"{ini.isoformat()}..{fin.isoformat()}",
+                                    'BORRADOR','AUDITADA',
+                                    'Sin conflictos Opción 1/Opción 2'
+                                )
+                                st.session_state["_flash_minuta"]="✅ Minuta auditada. Ahora envíala a Coordinación."
+                                st.rerun()
+
+                        estados_min = set(df_min["estado"].astype(str).str.upper().tolist())
+                        lista_para_revision = bool(estados_min) and "BORRADOR" not in estados_min
                         with ab2:
-                            auditadas=int((df_min["estado"].astype(str)=="AUDITADA").sum())
-                            if st.button("✅ Publicar período",use_container_width=True,key="publicar_minuta_periodo",disabled=(auditadas==0)):
+                            etiqueta_envio = (
+                                "↻ Reenviar a Coordinación"
+                                if estado_coord in ["OBSERVADA","REQUIERE_REVALIDACION"]
+                                else "📤 Enviar a Coordinación"
+                            )
+                            envio_bloqueado = (
+                                not lista_para_revision
+                                or estado_coord in ["EN_REVISION","AUTORIZADA","PUBLICADA"]
+                            )
+                            if st.button(
+                                etiqueta_envio,
+                                use_container_width=True,
+                                key="enviar_coord_minuta_periodo",
+                                disabled=envio_bloqueado
+                            ):
+                                version_coord = _enviar_minuta_coordinacion(
+                                    ini.isoformat(),fin.isoformat(),
+                                    st.session_state.usuario.get('username')
+                                )
+                                st.session_state["_flash_minuta"] = (
+                                    f"✅ Minuta enviada a Coordinación para revisión · versión {version_coord}."
+                                )
+                                st.rerun()
+
+                        with ab3:
+                            publicar_habilitado = estado_coord=="AUTORIZADA"
+                            if st.button(
+                                "✅ Publicar período",
+                                use_container_width=True,
+                                key="publicar_minuta_periodo",
+                                disabled=not publicar_habilitado
+                            ):
                                 with conn.session as ses:
-                                    execute_sql(ses,"UPDATE minutas SET estado='PUBLICABLE' WHERE activo=1 AND fecha>=%s AND fecha<=%s AND estado='AUDITADA'",(ini.isoformat(),fin.isoformat()))
+                                    execute_sql(
+                                        ses,
+                                        "UPDATE minutas SET estado='PUBLICABLE' "
+                                        "WHERE activo=1 AND fecha>=%s AND fecha<=%s "
+                                        "AND estado IN ('AUDITADA','BORRADOR')",
+                                        (ini.isoformat(),fin.isoformat())
+                                    )
+                                    execute_sql(
+                                        ses,
+                                        """
+                                        UPDATE minuta_flujo_coordinacion
+                                        SET estado='PUBLICADA'
+                                        WHERE fecha_desde=%s AND fecha_hasta=%s
+                                          AND COALESCE(activo,1)=1
+                                          AND estado='AUTORIZADA'
+                                        """,
+                                        (ini.isoformat(),fin.isoformat())
+                                    )
                                     ses.commit()
-                                registrar_auditoria(st.session_state.usuario.get('username'),'PUBLICAR_MINUTA','minutas',f"{ini.isoformat()}..{fin.isoformat()}",'AUDITADA','PUBLICABLE','Publicación posterior a auditoría')
-                                get_minutas_rango.clear(); st.session_state["_flash_minuta"]="✅ Minuta publicada para reservas."; st.rerun()
+                                registrar_auditoria(
+                                    st.session_state.usuario.get('username'),
+                                    'PUBLICAR_MINUTA','minutas',
+                                    f"{ini.isoformat()}..{fin.isoformat()}",
+                                    'AUTORIZADA','PUBLICABLE',
+                                    'Publicación posterior a autorización de Coordinación'
+                                )
+                                get_minutas_rango.clear()
+                                asunto_pub = "[ALEMSI] Minuta autorizada publicada"
+                                html_pub = f"""
+                                <div style='font-family:Arial,sans-serif;max-width:680px;margin:auto;border:1px solid #d7e2dc;border-radius:14px;padding:22px'>
+                                  <h2 style='color:#086B37'>Minuta publicada</h2>
+                                  <p>La minuta previamente autorizada por Coordinación fue publicada por Administración Casino.</p>
+                                  <p><b>Período:</b> {ini.strftime('%d/%m/%Y')} → {fin.strftime('%d/%m/%Y')}</p>
+                                </div>
+                                """
+                                _notificar_flujo_coordinacion('coordinacion', asunto_pub, html_pub, 'minuta_flujo_coordinacion', f'{ini.isoformat()}..{fin.isoformat()}', st.session_state.usuario.get('username'), 'Confirmación de publicación')
+                                st.session_state["_flash_minuta"]="✅ Minuta autorizada por Coordinación y publicada para reservas."
+                                st.rerun()
+
+                        if estado_coord=="EN_REVISION":
+                            st.info("La minuta está en revisión por Coordinación. Espera su decisión antes de publicar.")
+                        elif estado_coord=="OBSERVADA":
+                            st.warning("Coordinación observó la minuta. Corrige lo solicitado y vuelve a enviarla.")
+                        elif estado_coord=="REQUIERE_REVALIDACION":
+                            st.warning("La minuta cambió después del envío/autorización. Debe reenviarse a Coordinación.")
+                        elif estado_coord=="AUTORIZADA":
+                            st.success("Coordinación autorizó completamente esta propuesta. Ya puedes publicarla.")
             _sincronizar_maestro_platos()
             with st.expander("📚 Maestro de Platos · catálogo reutilizable", expanded=False):
                 st.caption("Fuente única para crear minutas. Los platos históricos de Minutas se incorporan al maestro sin modificar costos ni recetas.")
@@ -4528,6 +4888,11 @@ def render_admin():
                             execute_sql(ses,"INSERT INTO platos (nombre,servicio,valor,activo,descripcion,tipo_plato) SELECT %s,%s,0,1,'Creado desde editor de minuta',CASE WHEN %s='HIPOCALORICO' THEN 'Hipocalórico' ELSE NULL END WHERE NOT EXISTS (SELECT 1 FROM platos WHERE LOWER(TRIM(nombre))=LOWER(TRIM(%s)))",(plato,serv,opcion,plato))
                             ses.commit()
                         registrar_auditoria(st.session_state.usuario.get('username'),'EDITAR_MINUTA','minutas',fecha_n.isoformat(),actual,plato,f'{serv} · {opcion}')
+                        _invalidar_autorizacion_minuta(
+                            fecha_n.isoformat(),
+                            st.session_state.usuario.get('username'),
+                            f"Minuta modificada por AdminCasino: {serv} · {opcion}"
+                        )
                         get_minutas_rango.clear()
                         st.session_state["_flash_minuta"] = "✅ Minuta guardada como BORRADOR. Audítala antes de publicar."
                         st.rerun()
@@ -4547,7 +4912,13 @@ def render_admin():
                                         else: execute_sql(ses,"INSERT INTO minutas (fecha,dia_semana,servicio,tipo_opcion,plato,activo,estado) VALUES (%s,%s,%s,%s,%s,1,'BORRADOR')",(fi.isoformat(),dnom,str(rr['servicio']),str(rr['tipo_opcion']),str(rr['plato'])))
                                     ses.commit()
                                 _sincronizar_maestro_platos()
-                                st.success("Carga masiva completada y Maestro de Platos sincronizado."); st.rerun()
+                                for fecha_mod in sorted({pd.to_datetime(x).date().isoformat() for x in vista['fecha'].tolist()}):
+                                    _invalidar_autorizacion_minuta(
+                                        fecha_mod,
+                                        st.session_state.usuario.get('username'),
+                                        "Carga masiva CSV modificó la minuta"
+                                    )
+                                st.success("Carga masiva completada y Maestro de Platos sincronizado. La minuta debe volver a Coordinación si tenía una revisión previa."); st.rerun()
                     except Exception as e: st.error(f"No fue posible leer el CSV: {e}")
             with st.expander("Copiar minuta entre meses"):
                 c1,c2=st.columns(2)
@@ -4740,7 +5111,7 @@ def render_admin():
             with st.form("agregar_correo_config"):
                 c1,c2=st.columns(2)
                 with c1:
-                    tipo_correo=st.selectbox("Tipo", ["reclamos","cocina","finanzas","gerencia","bodega"])
+                    tipo_correo=st.selectbox("Tipo", ["reclamos","cocina","finanzas","gerencia","bodega","admin_casino","coordinacion"])
                     nuevo_correo=st.text_input("Correo destinatario*")
                 with c2:
                     descripcion_correo=st.text_input("Descripción", value="Destinatario configurado desde Administración")
@@ -4839,7 +5210,7 @@ def render_admin():
                         nn = st.text_input("Nombre*")
                         ne = st.text_input("Correo de recuperación*")
                     with c2:
-                        nr = st.selectbox("Rol*", ["Cocina","Finanzas","Gerencia","AdminCasino","Bodega","AdminTotal"])
+                        nr = st.selectbox("Rol*", ["Cocina","Finanzas","Gerencia","AdminCasino","Bodega","Coordinacion","AdminTotal"])
                         st.info("La APP generará una contraseña temporal y enviará el acceso al correo registrado.")
                     crear = st.form_submit_button("Crear usuario y enviar acceso", type="primary", use_container_width=True)
                 if crear:
@@ -4876,7 +5247,7 @@ def render_admin():
                     with c1:
                         nombre_n = st.text_input("Nombre", value=str(rowu['nombre'] or ''))
                         correo_n = st.text_input("Correo de recuperación", value=str(rowu.get('correo') or ''))
-                        roles = ["Cocina","Finanzas","Gerencia","AdminCasino","Bodega","AdminTotal"]
+                        roles = ["Cocina","Finanzas","Gerencia","AdminCasino","Bodega","Coordinacion","AdminTotal"]
                         rol_actual = str(rowu['rol']) if str(rowu['rol']) in roles else "Cocina"
                         rol_n = st.selectbox("Rol", roles, index=roles.index(rol_actual))
                     with c2:
@@ -5317,6 +5688,7 @@ def _v38_permiso_visible(usuario, permiso, rol=None):
     except Exception:
         return False
 
+# === v40 COORDINACION ACTIVA · SOLO VISACIÓN/AUTORIZACIÓN DE MINUTAS ===
 # === v38 COORDINACION FISCALIZADOR ===
 # Regla de arquitectura:
 # - Coordinacion es un perfil externo fiscalizador.
