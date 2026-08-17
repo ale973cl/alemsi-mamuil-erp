@@ -1,3 +1,31 @@
+# v2.1.3.40 — CIERRE DE ARQUITECTURA
+
+## Corregido en código
+- Regla transversal de selectores: helper neutro `— Seleccione —` para registros individuales; se retiran precargas automáticas de personas/reservas/comprobantes en Finanzas y Gerencia.
+- Comensal: RUT chileno, correo obligatorio normalizado con validación estructural + resolución de dominio, y teléfono móvil chileno normalizado a `+56 9 XXXX XXXX`.
+- Reservas: clave lógica activa `RUT + fecha + servicio` reforzada con índice único parcial PostgreSQL; duplicados históricos activos se inactivan sin borrar; edición conserva referencia y cancelación es no destructiva.
+- Excepción de reserva: AdminCasino puede autorizar rango temporal por RUT y motivo. Solo habilita la reserva normal; no crea raciones ni valida pagos.
+- Finanzas: decisión operativa única `APROBADO / RECHAZADO`; rechazo exige motivo, ambos requieren confirmación y generan correo; reingreso de comprobante conserva referencia e historial.
+- AdminCasino: se elimina la validación base de pagos. Arquitectura de módulos pasa a `ROL BASE + PERMISOS EXTRAORDINARIOS` mediante overrides explícitos de AdminTotal.
+- Gerencia: perfil base de consulta/análisis; dashboard agregado, reporte ejecutivo por institución y ranking de platos con filtro de período, sin detalle personal inicial ni controles operativos.
+- Minutas: rango libre, maestro universal para Opción 1/Opción 2, Tipo R disponible por servicio, auditoría preventiva de conflictos y flujo `BORRADOR → AUDITADA → PUBLICABLE`.
+- Producción: conteo solo de reservas activas deduplicadas, resumen por servicio/opción/plato, listado nominal ALEMSI y PDF Carta corporativo como salida principal.
+- Reportes: PDF Carta corporativo para Finanzas, Gerencia, AdminCasino y Producción; CSV/Excel quedan como exportación técnica secundaria.
+- Interfaz: autoscroll al inicio al cambiar de módulo.
+- Seguridad: depuración destructiva de producción deshabilitada en v40; no quedan sentencias `DELETE FROM` en código Python operativo.
+- Coordinación continúa deshabilitada para esta entrega y se mantiene únicamente como propuesta de Etapa 2.
+
+## Validación estática
+- `py_compile` y AST aprobados en `streamlit_app.py`, `common.py` y job de recordatorio.
+- Suite estática v40: 29/29 comprobaciones aprobadas.
+- Conciliación conceptual: 10 reservas = 4 Opción 1 + 3 Opción 2 + 3 Hipocalórico; duplicar la misma clave mantiene una sola ración válida.
+
+## Pendiente de prueba real
+- Ejecución de migraciones e índice único sobre PostgreSQL/Supabase real con respaldo previo.
+- Flujo completo Streamlit con datos productivos, permisos reales y concurrencia.
+- Envío SMTP real de aprobación/rechazo y validación DNS desde el hosting.
+- Visualización/impresión de PDFs en dispositivo/impresora real y verificación del activo gráfico oficial del logo.
+
 # v2.1.3.37 — Coordinación, permisos y calidad
 
 - Coordinación incorpora revisión de Recetas (Aprobar/Observar) sin modificar la receta oficial.

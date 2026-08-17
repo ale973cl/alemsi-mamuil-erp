@@ -1,5 +1,6 @@
 import hashlib
 import re
+import socket
 import random
 import smtplib
 import pandas as pd
@@ -168,6 +169,40 @@ def validar_rut_m11(rut: str) -> bool:
         return dv_calc==dv
     except: return False
 
+def normalizar_correo(correo: str) -> str:
+    return str(correo or "").strip().lower()
+
+def validar_correo_estructura(correo: str) -> bool:
+    correo = normalizar_correo(correo)
+    return bool(re.fullmatch(r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+", correo))
+
+def dominio_correo_resuelve(correo: str) -> bool:
+    """Valida que el dominio exista/resuelva. No restringe proveedor ni institución.
+    Se usa DNS del sistema; una caída temporal de DNS se informa como validación fallida.
+    """
+    correo = normalizar_correo(correo)
+    if not validar_correo_estructura(correo):
+        return False
+    dominio = correo.rsplit("@", 1)[-1]
+    try:
+        socket.getaddrinfo(dominio, 25, proto=socket.IPPROTO_TCP)
+        return True
+    except OSError:
+        return False
+
+def normalizar_telefono_chile(telefono: str) -> str:
+    digitos = re.sub(r"\D", "", str(telefono or ""))
+    if digitos.startswith("56"):
+        digitos = digitos[2:]
+    if digitos.startswith("0"):
+        digitos = digitos[1:]
+    if len(digitos) == 9 and digitos.startswith("9"):
+        return f"+56 9 {digitos[1:5]} {digitos[5:9]}"
+    return ""
+
+def telefono_movil_chile_valido(telefono: str) -> bool:
+    return bool(normalizar_telefono_chile(telefono))
+
 def gen_codigo(rut, serv, fecha_obj): 
     return f"{limpiar_rut(rut)[:4]}-{serv[:3].upper()}-{fecha_obj.strftime('%d%m')}-{random.randint(100,999)}"
 
@@ -254,7 +289,7 @@ def get_minutas_rango(fecha_inicio: str, fecha_fin: str):
             """
             SELECT fecha, dia_semana, servicio, tipo_opcion, plato
             FROM minutas
-            WHERE activo=1 AND fecha BETWEEN :inicio AND :fin
+            WHERE activo=1 AND COALESCE(estado,'PUBLICABLE')='PUBLICABLE' AND fecha BETWEEN :inicio AND :fin
             ORDER BY fecha,
                      CASE servicio WHEN 'Desayuno' THEN 1 WHEN 'Almuerzo' THEN 2 WHEN 'Once' THEN 3 WHEN 'Cena' THEN 4 ELSE 5 END,
                      CASE UPPER(REPLACE(tipo_opcion,'Ó','O')) WHEN 'OPCION 1' THEN 1 WHEN 'OPCION 2' THEN 2 WHEN 'OPCION 3' THEN 3 WHEN 'HIPOCALORICO' THEN 4 ELSE 5 END,
@@ -380,7 +415,8 @@ def init_db():
                     servicio TEXT,
                     tipo_opcion TEXT,
                     plato TEXT,
-                    activo INTEGER DEFAULT 1
+                    activo INTEGER DEFAULT 1,
+                    estado TEXT DEFAULT 'PUBLICABLE'
                 )
             """)
             # Solicitudes - ESTRUCTURA NATIVA POSTGRESQL CON COLUMNAS SOLICITADAS
@@ -404,7 +440,8 @@ def init_db():
                     fecha_modificacion TEXT,
                     modificado_por TEXT,
                     referencia_reserva TEXT,
-                    tipo_registro TEXT DEFAULT 'RESERVA_COMERCIAL'
+                    tipo_registro TEXT DEFAULT 'RESERVA_COMERCIAL',
+                    estado_reserva TEXT DEFAULT 'ACTIVA'
                 )
             """)
             # Bodega
@@ -539,6 +576,22 @@ def init_db():
                 )
             """)
             execute_sql(s, """
+                CREATE TABLE IF NOT EXISTS excepciones_reserva (
+                    id SERIAL PRIMARY KEY,
+                    rut TEXT NOT NULL,
+                    fecha_desde TEXT NOT NULL,
+                    fecha_hasta TEXT NOT NULL,
+                    motivo TEXT NOT NULL,
+                    autorizado_por TEXT NOT NULL,
+                    autorizado_at TEXT NOT NULL,
+                    activa INTEGER DEFAULT 1
+                )
+            """)
+            execute_sql(s, """
+                CREATE INDEX IF NOT EXISTS idx_excepciones_reserva_rut_fechas
+                ON excepciones_reserva(rut, fecha_desde, fecha_hasta, activa)
+            """)
+            execute_sql(s, """
                 CREATE TABLE IF NOT EXISTS usuarios_permisos (
                     username TEXT NOT NULL,
                     permiso TEXT NOT NULL,
@@ -670,8 +723,10 @@ def init_db():
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS fecha_modificacion TEXT",
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS modificado_por TEXT",
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS referencia_reserva TEXT",
+                "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS estado_reserva TEXT DEFAULT 'ACTIVA'",
                 "ALTER TABLE minutas ADD COLUMN IF NOT EXISTS fecha TEXT",
                 "ALTER TABLE minutas ADD COLUMN IF NOT EXISTS tipo_opcion TEXT",
+                "ALTER TABLE minutas ADD COLUMN IF NOT EXISTS estado TEXT DEFAULT 'PUBLICABLE'",
                 "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS activo INTEGER DEFAULT 1",
                 "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS fecha_creacion TEXT",
                 "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS debe_cambiar_password INTEGER DEFAULT 1",
@@ -689,6 +744,26 @@ def init_db():
                 "ALTER TABLE platos ADD COLUMN IF NOT EXISTS temporada TEXT",
             ]:
                 execute_sql(s, column_sql)
+
+            # v40: conserva históricos y neutraliza duplicados heredados antes de crear la invariante.
+            execute_sql(s, """
+                WITH ranked AS (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY rut,fecha,servicio ORDER BY id DESC
+                    ) AS rn
+                    FROM solicitudes
+                    WHERE COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
+                )
+                UPDATE solicitudes AS sol
+                SET estado_reserva='INACTIVA_DUPLICADA_V40'
+                FROM ranked r
+                WHERE sol.id=r.id AND r.rn>1
+            """)
+            execute_sql(s, """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_solicitudes_rut_fecha_servicio_activa
+                ON solicitudes (rut, fecha, servicio)
+                WHERE COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
+            """)
 
             execute_sql(s, """
                 CREATE TABLE IF NOT EXISTS comprobantes_pago (
