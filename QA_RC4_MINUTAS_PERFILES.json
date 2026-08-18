@@ -1,0 +1,17 @@
+{
+  "version": "ALEMSI v2.1.3.41-RC4",
+  "objetivo": "Cerrar etapa Minutas/Coordinación/Gerencia y estandarizar perfiles",
+  "checks": {
+    "common_intacto": true,
+    "bodega_admin_intacta": true,
+    "reservas_intactas": true,
+    "pdf_upload": true,
+    "gerencia_observa": true,
+    "coordinacion_pdf": true,
+    "banner_estandar": true,
+    "cocina_un_banner": true,
+    "coord_autoriza": true,
+    "admin_envia": true
+  },
+  "nota": "La carga PDF conserva el original y exige revisión humana. Si el PDF es escaneado sin texto digital, puede requerir completar filas manualmente."
+}

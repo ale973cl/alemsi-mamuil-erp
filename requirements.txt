@@ -8,3 +8,4 @@ reportlab>=4.2,<5
 
 google-api-python-client
 google-auth
+pypdf>=5,<7
