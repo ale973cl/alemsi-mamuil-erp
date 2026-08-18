@@ -1,0 +1,30 @@
+{
+  "compilacion_python": true,
+  "ast_valido": true,
+  "llamadas_top_level_antes_de_definir": [],
+  "sin_nameerror_orden_detectable": true,
+  "rutas_criticas": {
+    "comensal": true,
+    "casino": true,
+    "admin": true,
+    "coordinador": true,
+    "finanzas_ruta": true,
+    "cocina_ruta": true,
+    "minuta_envio_coord": true,
+    "mis_reservas": true,
+    "bloqueo_deuda_vencida": true,
+    "dashboard_integral": true
+  },
+  "rutas_criticas_ok": true,
+  "sin_helper_rol_visible_fuera_de_orden": true,
+  "regla_48h_preservada": true,
+  "consumire_no_consumire": true,
+  "navegacion_periodo_completo": true,
+  "coordinador_visible": true,
+  "common_intacto": true,
+  "bloques_protegidos": {
+    "cocina_bodega": true,
+    "admin_bodega": true
+  },
+  "coordinacion_logica_sin_reescritura": true
+}
