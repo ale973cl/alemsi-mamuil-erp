@@ -1,0 +1,24 @@
+{
+  "checks": {
+    "finance_checkbox": true,
+    "finance_backend_guard": true,
+    "start_checkbox": true,
+    "start_backend_guard": true,
+    "close_checkbox": true,
+    "close_backend_guard": true,
+    "coord_checkbox": true,
+    "admin_flow_permission": true,
+    "gerencia_read_only": true,
+    "coord_role_exclusive": true,
+    "bodega_untouched": true,
+    "reservas_untouched": true
+  },
+  "protected": {
+    "common": true,
+    "reservas": true,
+    "bodega_profile": true,
+    "bodega_admin": true
+  },
+  "compile": true,
+  "ast": true
+}

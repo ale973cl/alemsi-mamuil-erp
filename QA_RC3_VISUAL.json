@@ -1,0 +1,14 @@
+{
+  "version": "ALEMSI v2.1.3.40-RC3-VISUAL",
+  "python_compile": true,
+  "ast_parse": true,
+  "common_intacto": true,
+  "requirements_intacto": true,
+  "cambios": [
+    "banner público simplificado",
+    "banner grande oculto en perfiles internos",
+    "subbanner actividad agregado",
+    "Coordinación solo fecha + activos hoy"
+  ],
+  "nota": "No se modificó lógica de reservas, pagos, bodega, producción, minutas ni coordinación en esta variante visual."
+}
