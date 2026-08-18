@@ -1,4 +1,4 @@
-# ALEMSI v2.1.3.44-RC7 · Minutas restauradas / estados separados - estabilización de confirmaciones, permisos y validación de minutas
+# ALEMSI v2.1.3.46-RC9 · Presentación estable / circuitos end-to-end - estabilización de confirmaciones, permisos y validación de minutas
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -16,7 +16,7 @@ from reportlab.lib.pagesizes import A4, LETTER
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.units import mm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether, Image
 from common import init_db, get_conn, hash_pwd, normalizar_rut, normalizar_rut_db, limpiar_rut, validar_rut_m11, apply_alemsi_style, MINUTA, get_precio, gen_codigo, descontar_bodega, formato_clp, enviar_email, EMAILS, get_instituciones, get_precio_institucion, get_precio_persona_institucion, PRECIO_DIA_DEFAULT, execute_sql, get_minutas_rango, get_correos, limpiar_cache_correos, gen_referencia_reserva, reserva_modificable, normalizar_correo, validar_correo_estructura, dominio_correo_resuelve, normalizar_telefono_chile, telefono_movil_chile_valido
 
 # ================================================================
@@ -226,7 +226,8 @@ def generar_pdf_reserva(nombre, rut, institucion, referencia, detalle, precio_di
     styles=getSampleStyleSheet()
     titulo=ParagraphStyle('titulo',parent=styles['Heading1'],textColor=colors.HexColor('#0A2F6B'),alignment=TA_CENTER,fontSize=18,spaceAfter=8)
     normal=styles['BodyText']
-    story=[Paragraph('ALEMSI · CASINO MAMUIL',titulo),Paragraph('DETALLE DE RESERVA',titulo)]
+    story=[]
+    _pdf_cabecera_corporativa(story,'DETALLE DE RESERVA','Casino Mamuil Malal')
     info=[[Paragraph('<b>Referencia</b>',normal),referencia,Paragraph('<b>Comensal</b>',normal),nombre],[Paragraph('<b>RUT</b>',normal),rut,Paragraph('<b>Institución</b>',normal),institucion]]
     t=Table(info,colWidths=[28*mm,55*mm,28*mm,55*mm]); t.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.6,colors.HexColor('#B7C7BD')),('BACKGROUND',(0,0),(0,-1),colors.HexColor('#F1F6F3')),('BACKGROUND',(2,0),(2,-1),colors.HexColor('#F1F6F3')),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('PADDING',(0,0),(-1,-1),6)])); story += [t,Spacer(1,7*mm)]
     for fecha_iso in sorted({x[0] for x in detalle}):
@@ -443,18 +444,21 @@ def _render_encuestas_portal(conn, token, referencia, rut, institucion):
         st.success("Gracias. Tu evaluación del Casino ya fue registrada.")
     else:
         with st.form(f"enc_casino_{referencia}"):
-            general = st.select_slider("Satisfacción general", options=[1,2,3,4,5], value=5, format_func=lambda x: "⭐"*x)
             comida = st.select_slider("Calidad de la comida", options=[1,2,3,4,5], value=5, format_func=lambda x: "⭐"*x)
             atencion = st.select_slider("Atención", options=[1,2,3,4,5], value=5, format_func=lambda x: "⭐"*x)
             limpieza = st.select_slider("Limpieza", options=[1,2,3,4,5], value=5, format_func=lambda x: "⭐"*x)
-            variedad = st.select_slider("Variedad", options=[1,2,3,4,5], value=5, format_func=lambda x: "⭐"*x)
             comentario = st.text_area("Comentario (opcional)", key=f"coment_casino_{referencia}")
-            if st.form_submit_button("Enviar evaluación del Casino", type="primary", use_container_width=True):
-                with conn.session as ses:
-                    execute_sql(ses, "INSERT INTO encuestas_satisfaccion (tipo,pago_token,referencia_reserva,rut,institucion,puntaje_general,puntaje_comida,puntaje_atencion,puntaje_limpieza,puntaje_variedad,comentario,fecha_respuesta) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", ("CASINO",token,referencia,rut,institucion,int(general),int(comida),int(atencion),int(limpieza),int(variedad),comentario.strip(),datetime.now().isoformat()))
-                    ses.commit()
-                st.success("Gracias por evaluar el servicio de Casino Mamuil Malal.")
-                st.rerun()
+            enviar_enc = st.form_submit_button("Enviar evaluación del Casino", type="primary", use_container_width=True)
+        if enviar_enc:
+            promedio=round((int(comida)+int(atencion)+int(limpieza))/3)
+            ahora_enc=datetime.now().isoformat()
+            with conn.session as ses:
+                execute_sql(ses, "INSERT INTO encuestas_satisfaccion (tipo,pago_token,referencia_reserva,rut,institucion,puntaje_general,puntaje_comida,puntaje_atencion,puntaje_limpieza,puntaje_variedad,comentario,fecha_respuesta) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", ("CASINO",token,referencia,rut,institucion,int(promedio),int(comida),int(atencion),int(limpieza),None,comentario.strip(),ahora_enc))
+                ses.commit()
+            if comentario.strip():
+                _notificar_evento('cocina',f"[ALEMSI] Comentario evaluación Casino · {referencia}",f"<h2>Comentario de evaluación</h2><p><b>Institución:</b> {institucion}<br><b>Calidad comida:</b> {comida}/5<br><b>Atención:</b> {atencion}/5<br><b>Limpieza:</b> {limpieza}/5</p><p><b>Comentario:</b> {escape(comentario.strip())}</p>")
+            st.success("Gracias por evaluar el servicio de Casino Mamuil Malal.")
+            st.rerun()
 
     st.markdown("### 📱 Califica la APP ALEMSI")
     st.caption("Evaluación independiente de la interfaz y facilidad de uso de la aplicación.")
@@ -496,10 +500,11 @@ def _render_satisfaccion_gestion(usuario, key_prefix="sat"):
         general=pd.to_numeric(df["puntaje_general"],errors="coerce").mean()
         casino=df[df["tipo"].astype(str)=="CASINO"]
         app_df=df[df["tipo"].astype(str)=="APP"]
-        c1,c2,c3=st.columns(3)
+        c1,c2,c3,c4=st.columns(4)
         c1.metric("Evaluaciones",total)
-        c2.metric("Promedio general",f"{general:.2f} / 5" if pd.notna(general) else "—")
-        c3.metric("Casino / APP",f"{len(casino)} / {len(app_df)}")
+        c2.metric("Comida",f"{pd.to_numeric(casino['puntaje_comida'],errors='coerce').mean():.2f} / 5" if not casino.empty else "—")
+        c3.metric("Atención",f"{pd.to_numeric(casino['puntaje_atencion'],errors='coerce').mean():.2f} / 5" if not casino.empty else "—")
+        c4.metric("Limpieza",f"{pd.to_numeric(casino['puntaje_limpieza'],errors='coerce').mean():.2f} / 5" if not casino.empty else "—")
         resumen=(df.groupby("tipo",dropna=False).agg(
             Respuestas=("tipo","size"),
             Promedio=("puntaje_general",lambda s: pd.to_numeric(s,errors="coerce").mean())
@@ -733,7 +738,7 @@ if st.session_state.usuario or st.session_state.rut_actual:
     if st.session_state.usuario:
         col1,col2 = st.columns([4,1])
         with col1:
-            st.success(f"{st.session_state.usuario['nombre']} - {st.session_state.usuario['rol']}")
+            st.success(f"Hola, {st.session_state.usuario['nombre']} · {_rol_visible(st.session_state.usuario['rol'])}")
         with col2:
             if st.button("Cerrar sesión", use_container_width=True):
                 registrar_evento_login(
@@ -762,6 +767,151 @@ def selector_neutro(label, opciones, *, key, format_func=None, placeholder="— 
     if callable(format_func):
         kwargs["format_func"] = format_func
     return st.selectbox(label, lista, **kwargs)
+
+def _rol_visible(rol):
+    return {
+        "Coordinacion":"Coordinador",
+        "AdminCasino":"AdminCasino",
+        "AdminTotal":"Administrador Total",
+        "Gerencia":"Gerencia",
+        "Finanzas":"Finanzas",
+        "Cocina":"Cocina",
+        "Bodega":"Operaciones",
+    }.get(str(rol or ""), str(rol or "Perfil"))
+
+
+def _viernes_base(fecha=None):
+    fecha=fecha or date.today()
+    # lunes=0 ... viernes=4
+    return fecha-timedelta(days=(fecha.weekday()-4)%7)
+
+
+def _periodo_coordinador_default(fecha=None):
+    ini=_viernes_base(fecha)
+    return ini, ini+timedelta(days=7)
+
+
+def _periodo_cocina_default(fecha=None):
+    ini=_viernes_base(fecha)
+    return ini, ini+timedelta(days=6)
+
+
+def _pdf_cabecera_corporativa(story, titulo, subtitulo=""):
+    """Cabecera común: logo ALEMSI + Alencín. No altera el contenido del documento."""
+    estilos=getSampleStyleSheet()
+    logo=Path(__file__).resolve().parent/'assets'/'alemsi_logo.png'
+    mascota=Path(__file__).resolve().parent/'assets'/'alencin.png'
+    izq=[]; der=[]
+    if logo.exists(): izq.append(Image(str(logo),width=62*mm,height=18*mm))
+    else: izq.append(Paragraph("<b>ALEMSI</b>", estilos['Title']))
+    if mascota.exists(): der.append(Image(str(mascota),width=16*mm,height=20*mm))
+    cab=Table([[izq,der]],colWidths=[145*mm,25*mm])
+    cab.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ALIGN',(1,0),(1,0),'RIGHT'),('BOTTOMPADDING',(0,0),(-1,-1),4)]))
+    story.append(cab)
+    story.append(Paragraph(str(titulo),ParagraphStyle('corp_title',parent=estilos['Heading1'],fontSize=15,leading=18,textColor=colors.HexColor('#0A2F6B'))))
+    if subtitulo: story.append(Paragraph(str(subtitulo),estilos['Normal']))
+    story.append(Spacer(1,4*mm))
+
+
+def _destinatarios_evento(destino_tipo):
+    """Configuración de correo + respaldo por usuarios activos del rol. Evita circuitos sin destinatario."""
+    tipo=str(destino_tipo or '').strip().lower()
+    correos=[]
+    try:
+        for raw in get_correos(tipo):
+            # configuracion_correos puede contener lista separada por coma
+            correos += [x.strip() for x in str(raw).split(',') if '@' in x]
+    except Exception:
+        pass
+    mapa_roles={
+        'admin_casino':['AdminCasino'], 'coordinacion':['Coordinacion'], 'coordinador':['Coordinacion'],
+        'finanzas':['Finanzas'], 'cocina':['Cocina'], 'gerencia':['Gerencia'], 'reclamos':['AdminCasino','Gerencia']
+    }
+    if not correos and tipo in mapa_roles:
+        try:
+            roles=mapa_roles[tipo]
+            params={f'r{i}':r for i,r in enumerate(roles)}
+            ph=','.join(':'+k for k in params)
+            df=get_conn().query(f"SELECT correo FROM usuarios WHERE activo=1 AND rol IN ({ph}) AND COALESCE(TRIM(correo),'')<>''",params=params,ttl=0)
+            correos += [str(x).strip() for x in df['correo'].tolist() if '@' in str(x)] if not df.empty else []
+        except Exception:
+            pass
+    # dedupe conservando orden
+    return list(dict.fromkeys(correos))
+
+def _reglas_reserva():
+    """Reglas operativas editables exclusivamente por AdminCasino."""
+    defaults={"anticipacion_reserva_horas":48,"cancelacion_directa_horas":24,"max_dias_consecutivos":7,"excepciones_habilitadas":1}
+    try:
+        df=get_conn().query("SELECT anticipacion_reserva_horas,cancelacion_directa_horas,max_dias_consecutivos,excepciones_habilitadas FROM configuracion_reservas WHERE id=1",ttl=0)
+        if not df.empty:
+            for k in defaults:
+                try: defaults[k]=int(df.iloc[0].get(k) if df.iloc[0].get(k) is not None else defaults[k])
+                except Exception: pass
+    except Exception:
+        pass
+    return defaults
+
+
+def _fecha_hora_servicio_local(fecha_iso, servicio):
+    horas={"Desayuno":8,"Almuerzo":13,"Once":17,"Cena":20}
+    return datetime.combine(date.fromisoformat(str(fecha_iso)), datetime.min.time()).replace(hour=horas.get(str(servicio),12))
+
+
+def _reserva_comercial_habilitada(fecha_iso, servicio, ahora=None):
+    ahora=ahora or datetime.now()
+    horas=int(_reglas_reserva()["anticipacion_reserva_horas"])
+    return ahora <= _fecha_hora_servicio_local(fecha_iso,servicio)-timedelta(hours=horas)
+
+
+def _cancelacion_directa_habilitada(fecha_iso, servicio, ahora=None):
+    ahora=ahora or datetime.now()
+    horas=int(_reglas_reserva()["cancelacion_directa_horas"])
+    return ahora <= _fecha_hora_servicio_local(fecha_iso,servicio)-timedelta(hours=horas)
+
+
+def _cierre_reserva_visible(fecha_iso, servicio):
+    horas=int(_reglas_reserva()["anticipacion_reserva_horas"])
+    cierre=_fecha_hora_servicio_local(fecha_iso,servicio)-timedelta(hours=horas)
+    return cierre.strftime('%d/%m/%Y %H:%M')
+
+
+def _max_consecutivos_fechas(fechas):
+    ds=sorted({date.fromisoformat(str(x)) for x in fechas})
+    if not ds: return 0
+    mejor=actual=1
+    for a,b in zip(ds,ds[1:]):
+        actual=actual+1 if (b-a).days==1 else 1
+        mejor=max(mejor,actual)
+    return mejor
+
+
+def _generar_codigo_reserva_publico():
+    """Código visible corto. La referencia técnica histórica se conserva internamente."""
+    ahora=datetime.now()
+    pref=ahora.strftime('R-%d%m-%H%M-')
+    try:
+        df=get_conn().query("SELECT codigo_reserva FROM solicitudes WHERE codigo_reserva LIKE :p ORDER BY id DESC LIMIT 100",params={"p":pref+'%'},ttl=0)
+        usados=set(df['codigo_reserva'].astype(str).tolist()) if not df.empty else set()
+    except Exception:
+        usados=set()
+    for n in range(1,1000):
+        cod=f"{pref}{n:03d}"
+        if cod not in usados: return cod
+    return f"{pref}{int(ahora.timestamp())%1000:03d}"
+
+
+def _notificar_evento(destino_tipo, asunto, html):
+    """Motor común por evento: destinatarios configurados/fallback + resultado trazable."""
+    resultados=[]
+    destinos=_destinatarios_evento(destino_tipo)
+    for destino in destinos:
+        try:
+            ok,msg=enviar_email(destino,asunto,html)
+        except Exception as exc:
+            ok,msg=False,str(exc)
+        resultados.append({'destino':destino,'ok':bool(ok),'detalle':str(msg)})
+    return resultados
 
 def _excepcion_reserva_activa(rut, fecha_iso):
     """Solo amplía la ventana de reserva; no crea raciones ni valida pagos."""
@@ -1412,35 +1562,26 @@ def _render_minuta_semanal(df_minuta, fecha_base=None, titulo=True, fechas_visib
 
 
 def _deuda_vencida_bloqueante(rut):
-    """RES-PAGO-RC5: bloquea nuevas reservas si existe una reserva comercial activa con pago aún no validado.
-
-    Pago y reserva son estados independientes: una reserva futura pagada continúa ACTIVA
-    para Cocina/Producción hasta consumo, cancelación o cierre correspondiente.
-    """
+    """Bloquea por obligaciones de servicios ANTERIORES impagas/rechazadas; nunca por una reserva futura recién creada."""
     try:
-        conn = get_conn()
-        return conn.query(
+        hoy=date.today().isoformat()
+        return get_conn().query(
             """
-            SELECT
-                referencia_reserva,
-                MIN(fecha) AS primera_fecha,
-                MAX(fecha) AS ultima_fecha,
-                SUM(COALESCE(precio_aplicado,precio,0)) AS monto_pendiente,
-                STRING_AGG(DISTINCT COALESCE(NULLIF(TRIM(estado_pago),''),'Pendiente'), ', ') AS estados
+            SELECT referencia_reserva,
+                   COALESCE(MAX(NULLIF(codigo_reserva,'')),referencia_reserva) AS codigo_reserva,
+                   MIN(fecha) AS primera_fecha, MAX(fecha) AS ultima_fecha,
+                   SUM(COALESCE(precio_aplicado,precio,0)) AS monto_pendiente,
+                   STRING_AGG(DISTINCT COALESCE(NULLIF(TRIM(estado_pago),''),'Pendiente'), ', ') AS estados
             FROM solicitudes
             WHERE rut=:rut
-              AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
-              AND COALESCE(precio_aplicado,precio,0) > 0
+              AND fecha < :hoy
+              AND COALESCE(estado_reserva,'ACTIVA') NOT IN ('CANCELADA','ANULADA_EXCEPCIONAL')
+              AND COALESCE(precio_aplicado,precio,0)>0
               AND COALESCE(tipo_registro,'RESERVA_COMERCIAL')='RESERVA_COMERCIAL'
-              AND LOWER(TRIM(COALESCE(estado_pago,'Pendiente'))) NOT IN (
-                    'pagado','no aplica','costo asumido','costo asumido / no cobrable'
-              )
+              AND LOWER(TRIM(COALESCE(estado_pago,'Pendiente'))) NOT IN ('pagado','no aplica','costo asumido','costo asumido / no cobrable')
             GROUP BY referencia_reserva
-            ORDER BY MIN(fecha), referencia_reserva
-            """,
-            params={"rut": normalizar_rut_db(rut)},
-            ttl=0,
-        )
+            ORDER BY MIN(fecha),referencia_reserva
+            """,params={'rut':normalizar_rut_db(rut),'hoy':hoy},ttl=0)
     except Exception:
         return pd.DataFrame()
 
@@ -1575,8 +1716,9 @@ def generar_pdf_servicio_produccion_v40(fecha_iso, servicio):
         f"prod_head_{servicio}", parent=normal, fontName="Helvetica-Bold",
         textColor=colors.white, alignment=TA_CENTER
     )
-    story = [
-        Paragraph("ALEMSI · CASINO MAMUIL MALAL", titulo),
+    story = []
+    _pdf_cabecera_corporativa(story,'PRODUCCIÓN DEL DÍA',f'{servicio} · {date.fromisoformat(fecha_iso).strftime("%d/%m/%Y")}')
+    story += [
         Paragraph(f"HOJA OPERACIONAL · {servicio.upper()} · {date.fromisoformat(fecha_iso).strftime('%d/%m/%Y')}", titulo),
         Spacer(1, 2*mm),
     ]
@@ -1673,7 +1815,9 @@ def generar_pdf_ingredientes_dia_v40(fecha_iso):
     styles=getSampleStyleSheet()
     titulo=ParagraphStyle("ing_dia_title",parent=styles["Heading1"],fontSize=16,textColor=colors.HexColor("#0A2F6B"),alignment=TA_CENTER)
     normal=ParagraphStyle("ing_dia_normal",parent=styles["BodyText"],fontSize=7.5,leading=9)
-    story=[Paragraph("ALEMSI · CASINO MAMUIL MALAL",titulo),
+    story=[]
+    _pdf_cabecera_corporativa(story,'INSUMOS TOTALES DEL DÍA',date.fromisoformat(fecha_iso).strftime('%d/%m/%Y'))
+    story += [
            Paragraph(f"INSUMOS TOTALES DE PRODUCCIÓN · {date.fromisoformat(fecha_iso).strftime('%d/%m/%Y')}",titulo),
            Spacer(1,4*mm)]
     if ingredientes.empty:
@@ -1731,7 +1875,7 @@ def render_comensal():
             if not deuda_bloqueante.empty:
                 monto_bloqueado = int(pd.to_numeric(deuda_bloqueante["monto_pendiente"], errors="coerce").fillna(0).sum())
                 st.error(
-                    "Tienes uno o más servicios anteriores con pago pendiente o rechazado. "
+                    "Tienes uno o más servicios ya realizados con pago pendiente o rechazado. "
                     "Debes regularizar esos pagos antes de realizar una nueva reserva."
                 )
                 vista_deuda = deuda_bloqueante.copy()
@@ -1740,7 +1884,7 @@ def render_comensal():
                 vista_deuda["monto_pendiente"] = vista_deuda["monto_pendiente"].apply(lambda x: formato_clp(int(float(x or 0))))
                 st.dataframe(
                     vista_deuda.rename(columns={
-                        "referencia_reserva":"Reserva","primera_fecha":"Primer servicio",
+                        "codigo_reserva":"Código de reserva","primera_fecha":"Primer servicio",
                         "ultima_fecha":"Último servicio","monto_pendiente":"Monto pendiente","estados":"Estado"
                     }),
                     use_container_width=True, hide_index=True
@@ -1755,7 +1899,7 @@ def render_comensal():
                 else:
                     st.warning(resultado_anterior["mensaje"])
                 if resultado_anterior.get("referencia"):
-                    st.info(f"Referencia de consulta: {resultado_anterior['referencia']}")
+                    st.info(f"Código de reserva: {resultado_anterior.get('codigo_reserva') or resultado_anterior.get('referencia')}")
                 st.markdown("#### Reserva finalizada")
                 st.caption("Para terminar este flujo y volver al inicio, utiliza Finalizar.")
                 if st.button("✅ Finalizar", type="primary", use_container_width=True, key="cerrar_post_confirmacion"):
@@ -1852,7 +1996,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                 """, unsafe_allow_html=True)
                 st.caption(
                     "Puedes elegir un día, fechas consecutivas o fechas intercaladas. "
-                    "La reserva exige una anticipación mínima de 48 horas. Hoy, mañana y los días sin minuta no están disponibles."
+                    f"Las reservas se reciben hasta {_reglas_reserva()['anticipacion_reserva_horas']} horas antes de cada servicio. Los días sin minuta no están disponibles."
                 )
 
                 if "fechas_calendario" not in st.session_state:
@@ -1874,9 +2018,9 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                         with columna:
                             st.markdown('<span class="alemsi-cal-cell"></span>', unsafe_allow_html=True)
                             pertenece_mes = dia.month == hoy.month
-                            disponible = pertenece_mes and dia >= (hoy + timedelta(days=2)) and (
-                                not fechas_con_minuta or dia.isoformat() in fechas_con_minuta
-                            )
+                            servs_dia = df_disponibilidad[df_disponibilidad['fecha'].astype(str)==dia.isoformat()]['servicio'].astype(str).tolist() if pertenece_mes and not df_disponibilidad.empty else []
+                            habilitado_por_hora = any(_reserva_comercial_habilitada(dia.isoformat(), s) for s in servs_dia) if not es_alemsi else any(reserva_modificable(dia.isoformat(), s) for s in servs_dia)
+                            disponible = pertenece_mes and habilitado_por_hora and (not fechas_con_minuta or dia.isoformat() in fechas_con_minuta)
                             if not pertenece_mes:
                                 st.markdown("&nbsp;", unsafe_allow_html=True)
                             elif disponible:
@@ -1892,7 +2036,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                     args=(fecha_iso,),
                                 )
                             else:
-                                motivo = "Fuera de plazo 48 h" if dia < (hoy + timedelta(days=2)) else "Sin minuta"
+                                motivo = "Fuera de plazo" if pertenece_mes and dia.isoformat() in fechas_con_minuta else "Sin minuta"
                                 st.markdown(
                                     f"<div class='alemsi-cal-disabled'>"
                                     f"<b>{dia.day}</b><br><small>{motivo}</small></div>",
@@ -1917,8 +2061,11 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                 )
 
                 if continuar:
+                    reglas=_reglas_reserva()
                     if not seleccion:
                         st.error("Selecciona al menos una fecha disponible para continuar.")
+                    elif (not es_alemsi) and _max_consecutivos_fechas(seleccion) > int(reglas["max_dias_consecutivos"]):
+                        st.error(f"Puedes reservar como máximo {int(reglas['max_dias_consecutivos'])} días consecutivos. Ajusta las fechas seleccionadas.")
                     else:
                         st.session_state.dias_sel = seleccion
                         st.session_state.pedidos = {dia: {} for dia in seleccion}
@@ -2023,37 +2170,48 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                 st.warning("No existe minuta configurada para esta fecha.")
                             servicios_visibles = [x for x in orden_servicios if opciones_por_servicio.get(x)]
                             servicios_visibles += sorted([x for x in opciones_por_servicio if x not in servicios_visibles])
-                            servicios_fuera_48h = [s for s in servicios_visibles if not reserva_modificable(f_iso, s)]
-                            servicios_visibles = [s for s in servicios_visibles if reserva_modificable(f_iso, s)]
+                            servicios_fuera_48h = [s for s in servicios_visibles if not _reserva_comercial_habilitada(f_iso, s)]
+                            servicios_visibles = [s for s in servicios_visibles if _reserva_comercial_habilitada(f_iso, s)]
                             if servicios_fuera_48h:
                                 st.caption(
-                                    "Fuera del plazo mínimo de 48 h: " + ", ".join(servicios_fuera_48h) + "."
+                                    f"Fuera del plazo de reserva ({_reglas_reserva()['anticipacion_reserva_horas']} h): " + ", ".join(servicios_fuera_48h) + "."
                                 )
+                            decisiones_dia={}
                             for servicio in servicios_visibles:
                                 registros = opciones_por_servicio.get(servicio, [])
                                 icono = iconos_servicio.get(servicio, "🍴")
-                                with st.expander(f"{icono} {servicio}", expanded=False):
-                                    tokens = [""]
-                                    etiquetas = {"": f"— No reservar {servicio.lower()} —"}
-                                    for pos, registro in enumerate(registros):
-                                        token = f"{pos}|{registro['tipo']}|{registro['plato']}"
-                                        tokens.append(token)
-                                        prefijo = f"{registro['tipo']}: " if registro['tipo'] else ""
-                                        etiquetas[token] = f"{prefijo}{registro['plato']}"
-                                    actual = st.session_state.pedidos.get(f_iso, {}).get(servicio, "")
-                                    indice = 0
-                                    if actual:
-                                        for idx_token, token in enumerate(tokens):
-                                            if token and token.split("|", 2)[2] == actual:
-                                                indice = idx_token
-                                                break
-                                    elegido = st.selectbox(
-                                        f"Selecciona una opción de {servicio}", tokens, index=indice,
-                                        format_func=lambda token, mapa=etiquetas: mapa[token],
-                                        key=f"menu_v2132_{f_iso}_{servicio}",
+                                with st.expander(f"{icono} {servicio}", expanded=True):
+                                    st.caption(f"Reserva disponible hasta: {_cierre_reserva_visible(f_iso, servicio)}")
+                                    actual_plato = st.session_state.pedidos.get(f_iso, {}).get(servicio, "")
+                                    estado_inicial = "Consumiré" if actual_plato else "— Selecciona —"
+                                    decision=st.radio(
+                                        f"¿Consumirás {servicio.lower()}?",
+                                        ["— Selecciona —","Consumiré","No consumiré"],
+                                        index=["— Selecciona —","Consumiré","No consumiré"].index(estado_inicial),
+                                        horizontal=True,
+                                        key=f"decision_serv_{f_iso}_{servicio}",
                                     )
-                                    if elegido:
-                                        elecciones_dia[servicio] = elegido.split("|", 2)[2]
+                                    decisiones_dia[servicio]=decision
+                                    if decision=="Consumiré":
+                                        tokens=[""]
+                                        etiquetas={"":"— Selecciona un plato —"}
+                                        for pos,registro in enumerate(registros):
+                                            token=f"{pos}|{registro['tipo']}|{registro['plato']}"
+                                            tokens.append(token)
+                                            prefijo=f"{registro['tipo']}: " if registro['tipo'] else ""
+                                            etiquetas[token]=f"{prefijo}{registro['plato']}"
+                                        indice=0
+                                        if actual_plato:
+                                            for idx_token,token in enumerate(tokens):
+                                                if token and token.split("|",2)[2]==actual_plato:
+                                                    indice=idx_token; break
+                                        elegido=st.selectbox(
+                                            f"Plato de {servicio}",tokens,index=indice,
+                                            format_func=lambda token,mapa=etiquetas:mapa[token],
+                                            key=f"menu_v2132_{f_iso}_{servicio}",
+                                        )
+                                        if elegido:
+                                            elecciones_dia[servicio]=elegido.split("|",2)[2]
 
                         st.divider()
                         c1, c2, c3 = st.columns(3)
@@ -2088,8 +2246,14 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                     st.session_state.reserva_revisar = True
                                 st.rerun()
                         else:
-                            if not elecciones_dia:
-                                st.error("Selecciona al menos un servicio para este día antes de continuar.")
+                            faltan_decidir=[s for s in servicios_visibles if decisiones_dia.get(s)=="— Selecciona —"]
+                            consume_sin_plato=[s for s in servicios_visibles if decisiones_dia.get(s)=="Consumiré" and s not in elecciones_dia]
+                            if faltan_decidir:
+                                st.error("Debes indicar Consumiré o No consumiré en: " + ", ".join(faltan_decidir) + ".")
+                            elif consume_sin_plato:
+                                st.error("Selecciona un plato para: " + ", ".join(consume_sin_plato) + ".")
+                            elif not elecciones_dia:
+                                st.error("Si seleccionas este día debes reservar al menos un plato. Si no consumirás ningún servicio, quita el día de la selección.")
                             else:
                                 st.session_state.pedidos[f_iso] = elecciones_dia
                                 if idx < len(dias)-1:
@@ -2164,23 +2328,24 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                             st.error("Debes confirmar que revisaste la reserva.")
                             st.stop()
 
-                        # RES-48H-RC6: protección backend por fecha + hora real del servicio.
-                        fuera_plazo_48h = []
+                        # RC8: validación backend independiente de la UI.
+                        reglas_rc8=_reglas_reserva()
+                        fuera_plazo=[]
                         for f_iso, _dnom, servicio, *_resto in detalle:
-                            if not reserva_modificable(f_iso, servicio):
-                                fuera_plazo_48h.append(
-                                    f"{servicio} · {date.fromisoformat(f_iso).strftime('%d/%m/%Y')}"
-                                )
-                        if fuera_plazo_48h:
-                            st.error(
-                                "La reserva exige al menos 48 horas de anticipación. "
-                                "Fuera de plazo: " + ", ".join(sorted(set(fuera_plazo_48h))) + "."
-                            )
+                            habilitada = reserva_modificable(f_iso,servicio) if es_alemsi else _reserva_comercial_habilitada(f_iso,servicio)
+                            if not habilitada:
+                                fuera_plazo.append(f"{servicio} · {date.fromisoformat(f_iso).strftime('%d/%m/%Y')}")
+                        if fuera_plazo:
+                            st.error(f"La reserva exige al menos {int(reglas_rc8['anticipacion_reserva_horas']) if not es_alemsi else 48} horas de anticipación. Fuera de plazo: " + ", ".join(sorted(set(fuera_plazo))) + ".")
+                            st.stop()
+                        if (not es_alemsi) and _max_consecutivos_fechas(dias) > int(reglas_rc8['max_dias_consecutivos']):
+                            st.error(f"Máximo permitido: {int(reglas_rc8['max_dias_consecutivos'])} días consecutivos.")
                             st.stop()
 
                         conn = get_conn()
                         vouchers = []
                         referencia_reserva = gen_referencia_reserva(rut)
+                        codigo_reserva_publico = _generar_codigo_reserva_publico()
                         correo_cli = str(com.iloc[0].get("correo") or "").strip()
                         try:
                             with conn.session as sesion:
@@ -2201,16 +2366,16 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                                 raise ValueError(f"{servicio} del {date.fromisoformat(f_iso).strftime('%d/%m/%Y')} ya no puede modificarse porque faltan menos de 48 horas.")
                                             execute_sql(
                                                 sesion,
-                                                "UPDATE solicitudes SET plato=%s,plato_reservado=%s,tipo_opcion=%s,precio=%s,precio_aplicado=%s,institucion=%s,correo=%s,metodo_pago=%s,estado_pago=%s,estado_consumo=%s,fecha_modificacion=%s,modificado_por=%s,referencia_reserva=%s,tipo_registro=%s,estado_reserva='ACTIVA' WHERE id=%s",
-                                                (plato, plato, tipo_opcion_int, 0, 0, institucion, correo_cli, "Interno ALEMSI", "No aplica", estado_bd, ahora_iso, rut, referencia_reserva, "CONSUMO_INTERNO", existente["id"]),
+                                                "UPDATE solicitudes SET plato=%s,plato_reservado=%s,tipo_opcion=%s,precio=%s,precio_aplicado=%s,institucion=%s,correo=%s,metodo_pago=%s,estado_pago=%s,estado_consumo=%s,fecha_modificacion=%s,modificado_por=%s,referencia_reserva=%s,codigo_reserva=COALESCE(NULLIF(codigo_reserva,''),%s),tipo_registro=%s,estado_reserva='ACTIVA' WHERE id=%s",
+                                                (plato, plato, tipo_opcion_int, 0, 0, institucion, correo_cli, "Interno ALEMSI", "No aplica", estado_bd, ahora_iso, rut, referencia_reserva, codigo_reserva_publico, "CONSUMO_INTERNO", existente["id"]),
                                             )
                                         else:
                                             execute_sql(
                                                 sesion,
                                                 "INSERT INTO solicitudes "
-                                                "(rut,fecha,servicio,plato,plato_reservado,tipo_opcion,codigo,precio,precio_aplicado,institucion,correo,metodo_pago,estado_pago,estado_consumo,fecha_creacion,fecha_modificacion,modificado_por,referencia_reserva,tipo_registro) "
-                                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                                                (rut, f_iso, servicio, plato, plato, tipo_opcion_int, None, 0, 0, institucion, correo_cli, "Interno ALEMSI", "No aplica", estado_bd, ahora_iso, ahora_iso, rut, referencia_reserva, "CONSUMO_INTERNO"),
+                                                "(rut,fecha,servicio,plato,plato_reservado,tipo_opcion,codigo,precio,precio_aplicado,institucion,correo,metodo_pago,estado_pago,estado_consumo,fecha_creacion,fecha_modificacion,modificado_por,referencia_reserva,codigo_reserva,tipo_registro) "
+                                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                                                (rut, f_iso, servicio, plato, plato, tipo_opcion_int, None, 0, 0, institucion, correo_cli, "Interno ALEMSI", "No aplica", estado_bd, ahora_iso, ahora_iso, rut, referencia_reserva, codigo_reserva_publico, "CONSUMO_INTERNO"),
                                             )
                                 else:
                                     precio_por_linea = {}
@@ -2225,7 +2390,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                         execute_sql(sesion, "SELECT pg_advisory_xact_lock(hashtext(%s))", (clave_bloqueo,))
                                         existente = execute_sql(
                                             sesion,
-                                            "SELECT id,codigo,referencia_reserva FROM solicitudes WHERE rut=%s AND fecha=%s AND servicio=%s AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA' ORDER BY id DESC LIMIT 1 FOR UPDATE",
+                                            "SELECT id,codigo,referencia_reserva,codigo_reserva FROM solicitudes WHERE rut=%s AND fecha=%s AND servicio=%s AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA' ORDER BY id DESC LIMIT 1 FOR UPDATE",
                                             (rut, f_iso, servicio),
                                         ).mappings().first()
                                         ahora_iso = datetime.now().isoformat()
@@ -2236,16 +2401,16 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                             codigo = existente.get("codigo") or codigo
                                             execute_sql(
                                                 sesion,
-                                                "UPDATE solicitudes SET plato=%s,plato_reservado=%s,precio=%s,precio_aplicado=%s,institucion=%s,correo=%s,metodo_pago=%s,estado_pago=%s,estado_consumo=%s,fecha_modificacion=%s,modificado_por=%s,referencia_reserva=%s,tipo_registro=%s,estado_reserva='ACTIVA' WHERE id=%s",
-                                                (plato, plato, precio_por_linea[(f_iso, servicio, plato)], precio_por_linea[(f_iso, servicio, plato)], institucion, correo_cli, metodo, "Costo asumido" if es_coordinador_comensal else "Pendiente", "Pendiente", ahora_iso, rut, referencia_reserva, "CONSUMO_COORDINADOR" if es_coordinador_comensal else "RESERVA_COMERCIAL", existente["id"]),
+                                                "UPDATE solicitudes SET plato=%s,plato_reservado=%s,precio=%s,precio_aplicado=%s,institucion=%s,correo=%s,metodo_pago=%s,estado_pago=%s,estado_consumo=%s,fecha_modificacion=%s,modificado_por=%s,referencia_reserva=%s,codigo_reserva=COALESCE(NULLIF(codigo_reserva,''),%s),tipo_registro=%s,estado_reserva='ACTIVA' WHERE id=%s",
+                                                (plato, plato, precio_por_linea[(f_iso, servicio, plato)], precio_por_linea[(f_iso, servicio, plato)], institucion, correo_cli, metodo, "Costo asumido" if es_coordinador_comensal else "Pendiente", "Pendiente", ahora_iso, rut, referencia_reserva, codigo_reserva_publico, "CONSUMO_COORDINADOR" if es_coordinador_comensal else "RESERVA_COMERCIAL", existente["id"]),
                                             )
                                         else:
                                             execute_sql(
                                                 sesion,
                                                 "INSERT INTO solicitudes "
-                                                "(rut,fecha,servicio,plato,plato_reservado,codigo,precio,precio_aplicado,institucion,correo,metodo_pago,estado_pago,estado_consumo,fecha_creacion,fecha_modificacion,modificado_por,referencia_reserva,tipo_registro) "
-                                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                                                (rut, f_iso, servicio, plato, plato, codigo, precio_por_linea[(f_iso, servicio, plato)], precio_por_linea[(f_iso, servicio, plato)], institucion, correo_cli, metodo, "Costo asumido" if es_coordinador_comensal else "Pendiente", "Pendiente", ahora_iso, ahora_iso, rut, referencia_reserva, "CONSUMO_COORDINADOR" if es_coordinador_comensal else "RESERVA_COMERCIAL"),
+                                                "(rut,fecha,servicio,plato,plato_reservado,codigo,precio,precio_aplicado,institucion,correo,metodo_pago,estado_pago,estado_consumo,fecha_creacion,fecha_modificacion,modificado_por,referencia_reserva,codigo_reserva,tipo_registro) "
+                                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                                                (rut, f_iso, servicio, plato, plato, codigo, precio_por_linea[(f_iso, servicio, plato)], precio_por_linea[(f_iso, servicio, plato)], institucion, correo_cli, metodo, "Costo asumido" if es_coordinador_comensal else "Pendiente", "Pendiente", ahora_iso, ahora_iso, rut, referencia_reserva, codigo_reserva_publico, "CONSUMO_COORDINADOR" if es_coordinador_comensal else "RESERVA_COMERCIAL"),
                                             )
                                         vouchers.append(codigo)
                                 sesion.commit()
@@ -2279,7 +2444,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                 bloque_link = f"<p style='margin:18px 0'><a href='{url_comprobante}' style='background:#086B37;color:white;padding:12px 18px;text-decoration:none;border-radius:8px;font-weight:bold'>SUBIR COMPROBANTE DE PAGO</a></p>"
                                 banco_cfg = get_config_bancaria() if str(metodo).strip().casefold() == "transferencia bancaria".casefold() else {}
                             detalle_html = _detalle_html_por_dia(detalle)
-                            pdf_reserva = generar_pdf_reserva(nombre,rut,institucion,referencia_reserva,detalle,precio_dia,total_real,metodo,url_comprobante)
+                            pdf_reserva = generar_pdf_reserva(nombre,rut,institucion,codigo_reserva_publico,detalle,precio_dia,total_real,metodo,url_comprobante)
                             if banco_cfg:
                                 bloque_banco = f"""
                                 <div style='background:#f7fbfa;border:1px solid #cfe3df;padding:14px;border-radius:10px;margin:14px 0'>
@@ -2302,7 +2467,7 @@ Tipo: {banco_cfg.get('tipo_cuenta','')}
 Cuenta: {banco_cfg.get('numero_cuenta','')}
 Correo: {banco_cfg.get('correo_comprobantes','')}
 Monto: {formato_clp(total_real)}
-Referencia: {referencia_reserva}</div>
+Código: {codigo_reserva_publico}</div>
                                 </div>
                                 """
                             else:
@@ -2311,7 +2476,7 @@ Referencia: {referencia_reserva}</div>
                             <div style="font-family:Arial,sans-serif;padding:24px;border:2px solid #0A2F6B;border-radius:16px;max-width:760px">
                               <div style="background:#0A2F6B;padding:20px;border-radius:12px;color:white;text-align:center"><h1 style="margin:0;color:white">🍽️ Mamuil Malal</h1><p>Comprobante de reserva</p></div>
                               <h2 style="color:#0A2F6B">Hola {nombre}</h2>
-                              <p style="font-size:18px"><b>Referencia:</b> {referencia_reserva}</p>
+                              <p style="font-size:18px"><b>Código de reserva:</b> {codigo_reserva_publico}</p>
                               <p><b>RUT:</b> {rut} · <b>Institución:</b> {institucion}</p>
                               <p><b>Fecha de emisión:</b> {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
                               <p><b>Días:</b> {len(dias)} · <b>Valor total de la reserva:</b> {formato_clp(total_real)}</p>
@@ -2321,55 +2486,104 @@ Referencia: {referencia_reserva}</div>
                               <h3 style="color:#0A2F6B">Detalle de reserva</h3>{detalle_html}
                               <div style="background:#F1F6F3;padding:14px;border-radius:10px;margin-top:14px"><b>Sube tu comprobante aquí</b>{bloque_link}<span style="font-size:13px">El pago no es obligatorio antes del consumo. Puedes utilizar este mismo enlace cuando corresponda.</span><p style="margin-bottom:0"><b>Gracias por utilizar nuestra aplicación.</b> Después de cargar tu comprobante, esta misma ventana se actualizará para que puedas calificar primero el servicio de Casino Mamuil Malal y, debajo, la APP ALEMSI.</p></div>
                             </div>"""
-                            adjuntos=[(f"Reserva_{referencia_reserva}.pdf",pdf_reserva,"pdf")]
-                            correo_ok, correo_msg = enviar_email(correo_cli, f"Reserva {referencia_reserva} · Mamuil Malal", html_comprobante, adjuntos=adjuntos)
+                            adjuntos=[(f"Reserva_{codigo_reserva_publico}.pdf",pdf_reserva,"pdf")]
+                            correo_ok, correo_msg = enviar_email(correo_cli, f"Reserva {codigo_reserva_publico} · Mamuil Malal", html_comprobante, adjuntos=adjuntos)
                             # MAIL-02: al confirmar se notifica solo al comensal.
                             # Cocina recibirá posteriormente un resumen consolidado de producción,
                             # evitando un correo individual por cada reserva.
-                            mensaje_resultado = f"¡Felicitaciones! Tu reserva fue realizada con éxito. Te esperamos. Comprobante enviado a {correo_cli}." if correo_ok else f"Tu reserva fue realizada con éxito, referencia {referencia_reserva}, pero el comprobante no pudo enviarse: {correo_msg}"
+                            mensaje_resultado = f"¡Felicitaciones! Tu reserva fue realizada con éxito. Te esperamos. Comprobante enviado a {correo_cli}." if correo_ok else f"Tu reserva fue realizada con éxito, código {codigo_reserva_publico}, pero el comprobante no pudo enviarse: {correo_msg}"
                             ok_resultado = correo_ok
 
                         st.session_state.dias_sel = []
                         st.session_state.pedidos = {}
                         st.session_state.reserva_revisar = False
-                        st.session_state.resultado_reserva = {"ok": ok_resultado, "mensaje": mensaje_resultado, "vouchers": vouchers, "referencia": referencia_reserva}
+                        st.session_state.resultado_reserva = {"ok": ok_resultado, "mensaje": mensaje_resultado, "vouchers": vouchers, "referencia": referencia_reserva, "codigo_reserva": codigo_reserva_publico}
                         st.rerun()
 
         with tab_mis_reservas:
-            st.markdown("#### 🗂️ Mis reservas activas")
+            st.markdown("#### 🗂️ Mis reservas")
+            reglas_mis=_reglas_reserva()
             df_mis = conn.query("""
-                SELECT referencia_reserva, MIN(fecha) AS desde, MAX(fecha) AS hasta,
-                       COUNT(*) AS servicios, MAX(COALESCE(estado_pago,'Pendiente')) AS estado_pago
+                SELECT referencia_reserva,
+                       COALESCE(MAX(NULLIF(codigo_reserva,'')),referencia_reserva) AS codigo_reserva,
+                       MIN(fecha) AS desde, MAX(fecha) AS hasta,
+                       COUNT(*) FILTER (WHERE COALESCE(estado_reserva,'ACTIVA')='ACTIVA') AS servicios_activos,
+                       COUNT(*) AS servicios_total,
+                       STRING_AGG(DISTINCT COALESCE(NULLIF(estado_pago,''),'Pendiente'), ', ') AS estado_pago,
+                       STRING_AGG(DISTINCT COALESCE(NULLIF(estado_reserva,''),'ACTIVA'), ', ') AS estado_reserva
                 FROM solicitudes
-                WHERE rut=:rut AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
-                  AND COALESCE(NULLIF(referencia_reserva,''),'')<>''
+                WHERE rut=:rut AND COALESCE(NULLIF(referencia_reserva,''),'')<>''
                 GROUP BY referencia_reserva
-                ORDER BY MIN(fecha) DESC
+                ORDER BY MAX(fecha) DESC
             """, params={"rut": rut}, ttl=0)
             if df_mis.empty:
-                st.info("No tienes reservas activas registradas.")
+                st.info("No tienes reservas registradas.")
             else:
-                st.dataframe(_tabla_visible(df_mis,{"referencia_reserva":"Referencia","desde":"Desde","hasta":"Hasta","servicios":"Servicios","estado_pago":"Estado pago"},["desde","hasta"]),use_container_width=True,hide_index=True)
-                ref_cancel = selector_neutro("Reserva a cancelar", df_mis["referencia_reserva"].astype(str).tolist(), key="comensal_cancel_ref")
-                if ref_cancel:
-                    lineas_cancel = conn.query("SELECT id,fecha,servicio,plato_reservado FROM solicitudes WHERE rut=:rut AND referencia_reserva=:ref AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA' ORDER BY fecha,servicio",params={"rut":rut,"ref":ref_cancel},ttl=0)
-                    st.dataframe(_tabla_visible(lineas_cancel,{"fecha":"Fecha","servicio":"Servicio","plato_reservado":"Plato"},["fecha"]),use_container_width=True,hide_index=True)
-                    bloqueadas=[]
-                    for _,lr in lineas_cancel.iterrows():
-                        if not _reserva_modificable_v40(rut,str(lr["fecha"]),str(lr["servicio"])):
-                            bloqueadas.append(f"{fecha_visible(lr['fecha'])} · {lr['servicio']}")
-                    if bloqueadas:
-                        st.warning("No se puede cancelar esta reserva porque contiene servicios fuera de la ventana permitida: " + ", ".join(bloqueadas))
-                    else:
-                        confirmar_cancel=st.checkbox("Confirmo que deseo cancelar esta reserva",key=f"cancel_ok_{ref_cancel}")
-                        if st.button("Cancelar reserva",type="primary",use_container_width=True,disabled=not confirmar_cancel,key=f"cancel_btn_{ref_cancel}"):
-                            ahora_cancel=datetime.now().isoformat()
-                            with conn.session as ses_cancel:
-                                execute_sql(ses_cancel,"UPDATE solicitudes SET estado_reserva='CANCELADA',fecha_modificacion=%s,modificado_por=%s WHERE rut=%s AND referencia_reserva=%s AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA'",(ahora_cancel,rut,rut,ref_cancel))
-                                ses_cancel.commit()
-                            registrar_auditoria(rut,'CANCELAR_RESERVA','solicitudes',ref_cancel,'ACTIVA','CANCELADA','Cancelación solicitada por el comensal; histórico conservado')
-                            st.success("Reserva cancelada sin borrar historial. Producción ya no la considerará.")
-                            st.rerun()
+                st.dataframe(_tabla_visible(df_mis,{"codigo_reserva":"Código de reserva","desde":"Desde","hasta":"Hasta","servicios_activos":"Servicios activos","estado_pago":"Estado pago","estado_reserva":"Estado reserva"},["desde","hasta"]),use_container_width=True,hide_index=True)
+                codigos=df_mis['codigo_reserva'].astype(str).tolist()
+                codigo_sel=selector_neutro("Código de reserva",codigos,key="comensal_codigo_reserva")
+                if codigo_sel:
+                    ref_sel=str(df_mis[df_mis['codigo_reserva'].astype(str)==codigo_sel].iloc[0]['referencia_reserva'])
+                    lineas=conn.query("""
+                        SELECT id,fecha,servicio,plato_reservado,estado_reserva,
+                               COALESCE(NULLIF(estado_pago,''),'Pendiente') AS estado_pago
+                        FROM solicitudes WHERE rut=:rut AND referencia_reserva=:ref
+                        ORDER BY fecha,servicio,id
+                    """,params={"rut":rut,"ref":ref_sel},ttl=0)
+                    st.dataframe(_tabla_visible(lineas,{"id":"N.º","fecha":"Fecha","servicio":"Servicio","plato_reservado":"Plato","estado_reserva":"Estado reserva","estado_pago":"Estado pago"},["fecha"]),use_container_width=True,hide_index=True)
+                    activas=lineas[lineas['estado_reserva'].fillna('ACTIVA').astype(str)=='ACTIVA'].copy()
+                    if not activas.empty:
+                        ids=st.multiselect("Servicios que deseas gestionar",activas['id'].astype(int).tolist(),key=f"mis_res_ids_{ref_sel}",format_func=lambda x: f"{fecha_visible(activas.loc[activas['id']==x,'fecha'].iloc[0])} · {activas.loc[activas['id']==x,'servicio'].iloc[0]}")
+                        if ids:
+                            sel=activas[activas['id'].astype(int).isin(ids)]
+                            directas=[]; excepcionales=[]
+                            for _,r in sel.iterrows():
+                                if _cancelacion_directa_habilitada(str(r['fecha']),str(r['servicio'])):
+                                    directas.append(int(r['id']))
+                                else:
+                                    excepcionales.append(int(r['id']))
+                            if directas and not excepcionales:
+                                st.info(f"Cancelación directa permitida hasta {int(reglas_mis['cancelacion_directa_horas'])} horas antes de cada servicio.")
+                                conf=st.checkbox("Confirmo cancelar los servicios seleccionados",key=f"conf_cancel_{ref_sel}")
+                                if st.button("Cancelar servicios seleccionados",type="primary",use_container_width=True,key=f"btn_cancel_{ref_sel}"):
+                                    if not conf:
+                                        st.warning("Confirma la cancelación antes de continuar.")
+                                    else:
+                                        ahora=datetime.now().isoformat()
+                                        with conn.session as ses:
+                                            for sid in directas:
+                                                execute_sql(ses,"UPDATE solicitudes SET estado_reserva='CANCELADA',fecha_modificacion=%s,modificado_por=%s WHERE id=%s AND rut=%s AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA'",(ahora,rut,sid,rut))
+                                            ses.commit()
+                                        registrar_auditoria(rut,'CANCELAR_SERVICIOS','solicitudes',codigo_sel,'ACTIVA','CANCELADA',f'{len(directas)} servicio(s) dentro de ventana')
+                                        st.success("Cancelación registrada. El historial se conserva y Producción dejará de considerar esos servicios.")
+                                        st.rerun()
+                            else:
+                                if not int(reglas_mis['excepciones_habilitadas']):
+                                    st.warning("La solicitud de excepciones está deshabilitada por Administración Casino.")
+                                else:
+                                    st.warning("Uno o más servicios están fuera de la ventana de cancelación directa. Puedes solicitar una excepción; la reserva no cambia hasta que AdminCasino resuelva.")
+                                    motivo_tipo=st.selectbox("Motivo",["Cambio de turno","Caso fortuito","Fuerza mayor","Instrucción institucional","Otro"],key=f"mot_exc_{ref_sel}")
+                                    detalle_exc=st.text_area("Detalle de la solicitud",key=f"det_exc_{ref_sel}")
+                                    conf_exc=st.checkbox("Confirmo enviar la solicitud excepcional a Administración Casino",key=f"conf_exc_{ref_sel}")
+                                    if st.button("Solicitar excepción",type="primary",use_container_width=True,key=f"btn_exc_{ref_sel}"):
+                                        if not conf_exc:
+                                            st.warning("Confirma el envío de la solicitud.")
+                                        elif motivo_tipo=="Otro" and not detalle_exc.strip():
+                                            st.error("Describe el motivo de la excepción.")
+                                        else:
+                                            ahora=datetime.now().isoformat(); creadas=0
+                                            with conn.session as ses:
+                                                for _,r in sel.iterrows():
+                                                    execute_sql(ses,"INSERT INTO solicitudes_excepcion_reserva (rut,referencia_reserva,codigo_reserva,fecha_servicio,servicio,motivo_tipo,motivo_detalle,estado,solicitado_at,solicitado_por) VALUES (%s,%s,%s,%s,%s,%s,%s,'PENDIENTE_ADMIN_CASINO',%s,%s)",(rut,ref_sel,codigo_sel,str(r['fecha']),str(r['servicio']),motivo_tipo,detalle_exc.strip(),ahora,rut)); creadas+=1
+                                                ses.commit()
+                                            registrar_auditoria(rut,'SOLICITAR_EXCEPCION_RESERVA','solicitudes_excepcion_reserva',codigo_sel,'','PENDIENTE_ADMIN_CASINO',f'{creadas} servicio(s) · {motivo_tipo}')
+                                            _notificar_evento('admin_casino',f"[ALEMSI] Solicitud excepcional · {codigo_sel}",f"<h2>Solicitud excepcional de reserva</h2><p><b>Código:</b> {codigo_sel}<br><b>RUT:</b> {rut}<br><b>Motivo:</b> {motivo_tipo}</p><p>{detalle_exc.strip()}</p>")
+                                            st.success("Solicitud enviada a Administración Casino. La reserva original permanece sin cambios hasta su resolución.")
+                                            st.rerun()
+                    exc_hist=conn.query("SELECT codigo_reserva,fecha_servicio,servicio,motivo_tipo,estado,resolucion,finanzas_estado,solicitado_at FROM solicitudes_excepcion_reserva WHERE rut=:rut ORDER BY id DESC LIMIT 100",params={"rut":rut},ttl=0)
+                    if not exc_hist.empty:
+                        with st.expander("⚖️ Mis solicitudes excepcionales",expanded=False):
+                            st.dataframe(_tabla_visible(exc_hist,{"codigo_reserva":"Código","fecha_servicio":"Fecha","servicio":"Servicio","motivo_tipo":"Motivo","estado":"Estado","resolucion":"Resolución","finanzas_estado":"Finanzas","solicitado_at":"Solicitada"},["fecha_servicio","solicitado_at"]),use_container_width=True,hide_index=True)
 
         with tab_reclamos:
             with st.form("reclamo"):
@@ -3019,193 +3233,117 @@ def _render_estado_coordinacion_admin(ini, fin):
 
 
 def render_coordinacion():
-    """Perfil exclusivo: visar, observar y autorizar minutas."""
+    """Coordinador: vista general + revisión secuencial por día; no edita la minuta."""
     _asegurar_revision_coordinacion()
-    conn = get_conn()
-    usuario = st.session_state.usuario
+    conn=get_conn(); usuario=st.session_state.usuario
+    st.markdown("### 🤝 Coordinador · Revisión de Minutas")
+    st.caption("Revisa, observa o autoriza. No modifica platos, recetas, Producción, Bodega ni Finanzas.")
 
-    st.markdown("### 🤝 Coordinación · Revisión de Minutas")
-    st.caption(
-        "Coordinación solo revisa la propuesta de minuta. "
-        "No modifica platos, recetas, producción, bodega ni finanzas."
-    )
+    # Vista general automática viernes->viernes; ajustable solo para visualización.
+    v_ini,v_fin=_periodo_coordinador_default()
+    vg1,vg2=st.columns(2)
+    with vg1: vista_ini=st.date_input("Vista desde",value=v_ini,key='coord_vista_desde')
+    with vg2: vista_fin=st.date_input("Vista hasta",value=v_fin,key='coord_vista_hasta')
+    if vista_fin>=vista_ini:
+        vista=conn.query("SELECT fecha,servicio,tipo_opcion,plato,COALESCE(estado,'BORRADOR') estado FROM minutas WHERE COALESCE(activo,1)=1 AND fecha>=:i AND fecha<=:f ORDER BY fecha,CASE servicio WHEN 'Desayuno' THEN 1 WHEN 'Almuerzo' THEN 2 WHEN 'Once' THEN 3 WHEN 'Cena' THEN 4 ELSE 5 END,tipo_opcion",params={'i':vista_ini.isoformat(),'f':vista_fin.isoformat()},ttl=15)
+        if vista.empty: st.info("No hay minutas para el rango visual seleccionado.")
+        else:
+            fechas=[vista_ini+timedelta(days=i) for i in range((vista_fin-vista_ini).days+1)]
+            _render_minuta_semanal(vista,fechas_visibles=fechas,titulo_personalizado=f"📅 Minuta completa · {vista_ini.strftime('%d/%m/%Y')} → {vista_fin.strftime('%d/%m/%Y')}")
 
-    pendientes = conn.query(
-        """
-        SELECT id,fecha_desde,fecha_hasta,version,estado,observacion,
-               enviado_por,enviado_at
-        FROM minuta_flujo_coordinacion
-        WHERE COALESCE(activo,1)=1 AND estado='EN_REVISION'
-        ORDER BY enviado_at DESC,id DESC
-        """, ttl=0
-    )
-
+    st.divider(); st.markdown("#### 🧭 Revisión diaria")
+    pendientes=conn.query("SELECT id,fecha_desde,fecha_hasta,version,estado,observacion,enviado_por,enviado_at FROM minuta_flujo_coordinacion WHERE COALESCE(activo,1)=1 AND estado='EN_REVISION' ORDER BY enviado_at DESC,id DESC",ttl=0)
     if pendientes.empty:
         st.success("No hay minutas pendientes de revisión.")
     else:
-        ids = pendientes["id"].astype(int).tolist()
-        flujo_id = selector_neutro(
-            "Minuta pendiente de revisión",
-            ids,
-            format_func=lambda x: (
-                f"{pendientes[pendientes['id'].astype(int)==int(x)].iloc[0]['fecha_desde']} → "
-                f"{pendientes[pendientes['id'].astype(int)==int(x)].iloc[0]['fecha_hasta']} · "
-                f"v{int(pendientes[pendientes['id'].astype(int)==int(x)].iloc[0]['version'])}"
-            ),
-            key="coord_flujo_minuta"
-        )
-        if flujo_id is None:
-            st.info("Selecciona una minuta para revisarla.")
-        else:
-            flujo = pendientes[pendientes["id"].astype(int)==int(flujo_id)].iloc[0]
-            ini = str(flujo["fecha_desde"])
-            fin = str(flujo["fecha_hasta"])
-            st.markdown(
-                f"#### Propuesta {fecha_visible(ini)} → {fecha_visible(fin)} "
-                f"· versión {int(flujo['version'])}"
-            )
-            st.caption(
-                f"Enviada por {flujo.get('enviado_por') or 'AdminCasino'} "
-                f"· {str(flujo.get('enviado_at') or '')[:16].replace('T',' ')}"
-            )
-            _render_documento_fuente_minuta(ini, fin, f"coord_pdf_{flujo_id}")
-
-            df = conn.query(
-                """
-                SELECT fecha,servicio,tipo_opcion,plato,
-                       COALESCE(estado,'BORRADOR') AS estado
-                FROM minutas
-                WHERE COALESCE(activo,1)=1 AND fecha>=:i AND fecha<=:f
-                ORDER BY fecha,
-                    CASE servicio WHEN 'Desayuno' THEN 1 WHEN 'Almuerzo' THEN 2
-                                  WHEN 'Once' THEN 3 WHEN 'Cena' THEN 4 ELSE 5 END,
-                    tipo_opcion,plato
-                """,
-                params={"i":ini,"f":fin}, ttl=0
-            )
+        flujo_id=selector_neutro("Minuta pendiente",pendientes['id'].astype(int).tolist(),format_func=lambda x:(f"{fecha_visible(pendientes[pendientes['id'].astype(int)==int(x)].iloc[0]['fecha_desde'])} → {fecha_visible(pendientes[pendientes['id'].astype(int)==int(x)].iloc[0]['fecha_hasta'])} · v{int(pendientes[pendientes['id'].astype(int)==int(x)].iloc[0]['version'])}"),key='coord_flujo_minuta')
+        if flujo_id is not None:
+            flujo=pendientes[pendientes['id'].astype(int)==int(flujo_id)].iloc[0]
+            ini,fin=str(flujo['fecha_desde']),str(flujo['fecha_hasta']); version=int(flujo['version'])
+            df=conn.query("SELECT fecha,servicio,tipo_opcion,plato FROM minutas WHERE COALESCE(activo,1)=1 AND fecha>=:i AND fecha<=:f ORDER BY fecha,CASE servicio WHEN 'Desayuno' THEN 1 WHEN 'Almuerzo' THEN 2 WHEN 'Once' THEN 3 WHEN 'Cena' THEN 4 ELSE 5 END,tipo_opcion,plato",params={'i':ini,'f':fin},ttl=0)
             if df.empty:
-                st.error("La propuesta no contiene minutas activas en este período.")
+                st.error("La propuesta enviada no contiene minutas activas.")
             else:
-                for fecha_d in sorted(df["fecha"].astype(str).unique().tolist()):
-                    d = df[df["fecha"].astype(str)==fecha_d].copy()
-                    st.markdown(f"##### {fecha_visible(fecha_d)}")
-                    st.dataframe(
-                        d[["servicio","tipo_opcion","plato"]].rename(columns={
-                            "servicio":"Servicio","tipo_opcion":"Opción","plato":"Plato"
-                        }),
-                        use_container_width=True, hide_index=True
-                    )
-
-                alertas = _alertas_preventivas_minuta(df)
-                if alertas:
-                    st.warning("La revisión preventiva detectó aspectos que conviene verificar:")
-                    for alerta in alertas:
-                        st.caption(f"• {alerta}")
-
-                decision = st.radio(
-                    "Decisión de Coordinación",
-                    ["AUTORIZAR","OBSERVAR"],
-                    horizontal=True,
-                    key=f"coord_decision_{flujo_id}"
-                )
-                observacion = st.text_area(
-                    "Observación para Administración Casino",
-                    key=f"coord_observacion_{flujo_id}",
-                    placeholder="Obligatoria si observas la minuta. Indica claramente qué debe revisar Administración Casino."
-                )
-                clave_conf_coord=f"coord_confirmar_{flujo_id}"
-                st.checkbox(
-                    "Confirmo que revisé la propuesta completa del período",
-                    key=clave_conf_coord,
-                    help="La minuta no se autoriza ni observa si esta casilla no está marcada."
-                )
-                st.caption("La decisión queda registrada con usuario, fecha, versión y trazabilidad.")
-
-                if st.button(
-                    "✅ AUTORIZAR MINUTA" if decision=="AUTORIZAR" else "🟠 ENVIAR OBSERVACIÓN",
-                    type="primary", use_container_width=True,
-                    key=f"coord_guardar_decision_{flujo_id}"
-                ):
-                    if not bool(st.session_state.get(clave_conf_coord, False)):
-                        st.warning("Confirma que revisaste la propuesta completa antes de guardar la decisión.")
-                    elif decision=="OBSERVAR" and not observacion.strip():
-                        st.error("Debes indicar la observación antes de devolver la minuta.")
+                fechas=sorted(df['fecha'].astype(str).unique().tolist())
+                rev=conn.query("SELECT fecha,servicio,tipo_opcion,plato_actual,accion,observacion FROM minuta_revision_coordinacion WHERE flujo_id=:id AND version=:v ORDER BY fecha,id",params={'id':int(flujo_id),'v':version},ttl=0)
+                completos=[]
+                for f in fechas:
+                    n_min=len(df[df['fecha'].astype(str)==f]); n_rev=len(rev[rev['fecha'].astype(str)==f]) if not rev.empty else 0
+                    if n_min>0 and n_rev>=n_min: completos.append(f)
+                progreso=len(completos)/len(fechas) if fechas else 0
+                st.progress(progreso,text=f"Revisión: {len(completos)} de {len(fechas)} días completados · {round(progreso*100)} %")
+                # selector día; arranca en primer pendiente
+                pred=next((i for i,f in enumerate(fechas) if f not in completos),0)
+                dia_sel=st.selectbox("Día a revisar",fechas,index=pred,format_func=fecha_visible,key=f'coord_dia_{flujo_id}')
+                d=df[df['fecha'].astype(str)==str(dia_sel)].copy()
+                prev=rev[rev['fecha'].astype(str)==str(dia_sel)].copy() if not rev.empty else pd.DataFrame()
+                with st.form(f'coord_revision_dia_{flujo_id}_{dia_sel}'):
+                    decisiones=[]
+                    st.markdown(f"##### {fecha_visible(dia_sel)}")
+                    for idx,r in d.reset_index(drop=True).iterrows():
+                        servicio=str(r['servicio']); opcion=str(r['tipo_opcion']); plato=str(r['plato'])
+                        p=prev[(prev['servicio'].astype(str)==servicio)&(prev['tipo_opcion'].astype(str)==opcion)&(prev['plato_actual'].astype(str)==plato)] if not prev.empty else pd.DataFrame()
+                        acc0=str(p.iloc[0]['accion']) if not p.empty else 'SIN_OBSERVACION'
+                        obs0=str(p.iloc[0]['observacion'] or '') if not p.empty else ''
+                        st.markdown(f"**{servicio} · {opcion}** — {plato}")
+                        c1,c2=st.columns([1,2])
+                        with c1:
+                            accion=st.radio("Revisión",['SIN_OBSERVACION','CON_OBSERVACION'],index=0 if acc0!='CON_OBSERVACION' else 1,format_func=lambda x:'Sin observación' if x=='SIN_OBSERVACION' else 'Con observación',horizontal=True,key=f'coord_acc_{flujo_id}_{dia_sel}_{idx}',label_visibility='collapsed')
+                        with c2:
+                            obs=st.text_input("Comentario",value=obs0,disabled=(accion!='CON_OBSERVACION'),placeholder='Escribe la observación',key=f'coord_obs_{flujo_id}_{dia_sel}_{idx}',label_visibility='collapsed')
+                        decisiones.append((servicio,opcion,plato,accion,obs.strip()))
+                    guardar=st.form_submit_button("💾 Guardar día y continuar",type='primary',use_container_width=True)
+                if guardar:
+                    faltan=[f"{s} · {o}" for s,o,p,a,ob in decisiones if a=='CON_OBSERVACION' and not ob]
+                    if faltan: st.error("Falta comentario en: "+', '.join(faltan))
                     else:
-                        nuevo_estado = "AUTORIZADA" if decision=="AUTORIZAR" else "OBSERVADA"
-                        ahora = datetime.now().isoformat()
+                        ahora=datetime.now().isoformat()
                         with conn.session as ses:
-                            execute_sql(
-                                ses,
-                                """
-                                UPDATE minuta_flujo_coordinacion
-                                SET estado=%s,observacion=%s,coordinador=%s,coordinacion_at=%s
-                                WHERE id=%s
-                                """,
-                                (nuevo_estado, observacion.strip(),
-                                 str(usuario.get("username")), ahora, int(flujo_id))
-                            )
+                            execute_sql(ses,"DELETE FROM minuta_revision_coordinacion WHERE flujo_id=%s AND version=%s AND fecha=%s",(int(flujo_id),version,str(dia_sel)))
+                            for s,o,p,a,ob in decisiones:
+                                execute_sql(ses,"INSERT INTO minuta_revision_coordinacion (flujo_id,version,fecha,servicio,tipo_opcion,plato_actual,accion,observacion,plato_propuesto,usuario,fecha_accion,estado) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'GUARDADA')",(int(flujo_id),version,str(dia_sel),s,o,p,a,ob,None,usuario.get('username'),ahora))
                             ses.commit()
-                        registrar_auditoria(
-                            usuario.get("username"),
-                            "DECISION_COORDINACION_MINUTA",
-                            "minuta_flujo_coordinacion",
-                            f"{ini}..{fin}",
-                            "EN_REVISION",
-                            nuevo_estado,
-                            observacion.strip()
-                        )
-                        asunto = (
-                            f"[ALEMSI] Minuta autorizada por Coordinación · v{int(flujo['version'])}"
-                            if nuevo_estado=="AUTORIZADA" else
-                            f"[ALEMSI] Minuta observada por Coordinación · v{int(flujo['version'])}"
-                        )
-                        html = f"""
-                        <div style='font-family:Arial,sans-serif;max-width:680px;margin:auto;border:1px solid #d7e2dc;border-radius:14px;padding:22px'>
-                          <h2 style='color:#0A2F6B'>Resultado de revisión de minuta</h2>
-                          <p><b>Período:</b> {fecha_visible(ini)} → {fecha_visible(fin)}<br>
-                             <b>Versión:</b> {int(flujo['version'])}<br>
-                             <b>Resultado:</b> {nuevo_estado}</p>
-                          <p><b>Observación:</b> {observacion.strip() or 'Sin observaciones'}</p>
-                          <p>{'La minuta ya puede ser publicada por Administración Casino.' if nuevo_estado=='AUTORIZADA' else 'Administración Casino debe corregir la minuta y reenviarla a Coordinación.'}</p>
-                        </div>
-                        """
-                        _notificar_flujo_coordinacion('admin_casino', asunto, html, 'minuta_flujo_coordinacion', flujo_id, usuario.get('username'), f'Decisión {nuevo_estado} v{int(flujo["version"])}')
-                        if nuevo_estado=="AUTORIZADA":
-                            st.success("Minuta autorizada. Administración Casino ya puede publicarla.")
-                        else:
-                            st.warning("Minuta observada y devuelta a Administración Casino para corrección.")
+                        registrar_auditoria(usuario.get('username'),'GUARDAR_REVISION_DIARIA','minuta_revision_coordinacion',f'{flujo_id}:{dia_sel}','','GUARDADA',f'{len(decisiones)} ítems revisados')
+                        st.success("Día guardado. Puedes continuar con la siguiente fecha.")
                         st.rerun()
 
-    st.divider()
-    st.markdown("#### Historial de revisiones")
-    historial = conn.query(
-        """
-        SELECT fecha_desde,fecha_hasta,version,estado,observacion,
-               enviado_por,enviado_at,coordinador,coordinacion_at
-        FROM minuta_flujo_coordinacion
-        ORDER BY id DESC LIMIT 100
-        """, ttl=0
-    )
-    if historial.empty:
-        st.caption("Sin revisiones registradas.")
-    else:
-        historial["estado"] = historial["estado"].apply(_estado_flujo_label)
-        st.dataframe(
-            historial.rename(columns={
-                "fecha_desde":"Desde","fecha_hasta":"Hasta","version":"Versión",
-                "estado":"Estado","observacion":"Observación","enviado_por":"Enviado por",
-                "enviado_at":"Fecha envío","coordinador":"Coordinador",
-                "coordinacion_at":"Fecha revisión"
-            }),
-            use_container_width=True, hide_index=True
-        )
+                # Resumen por fecha
+                if not rev.empty:
+                    resumen=[]
+                    for f in fechas:
+                        rr=rev[rev['fecha'].astype(str)==f]
+                        resumen.append({'Fecha':fecha_visible(f),'Estado':'✓ Revisado con observaciones' if (not rr.empty and (rr['accion'].astype(str)=='CON_OBSERVACION').any()) else ('✓ Revisado sin observaciones' if f in completos else '○ Pendiente'),'Comentarios':int((rr['accion'].astype(str)=='CON_OBSERVACION').sum()) if not rr.empty else 0})
+                    st.dataframe(pd.DataFrame(resumen),use_container_width=True,hide_index=True)
 
+                rev_final=conn.query("SELECT fecha,servicio,tipo_opcion,plato_actual,accion,observacion FROM minuta_revision_coordinacion WHERE flujo_id=:id AND version=:v ORDER BY fecha,id",params={'id':int(flujo_id),'v':version},ttl=0)
+                completos_final=[]
+                for f in fechas:
+                    if len(rev_final[rev_final['fecha'].astype(str)==f])>=len(df[df['fecha'].astype(str)==f]): completos_final.append(f)
+                listo=len(completos_final)==len(fechas)
+                observaciones=rev_final[rev_final['accion'].astype(str)=='CON_OBSERVACION'] if not rev_final.empty else pd.DataFrame()
+                st.caption("La decisión final se habilita únicamente cuando todos los días fueron revisados.")
+                if st.button("✅ Finalizar revisión completa",type='primary',use_container_width=True,disabled=not listo,key=f'coord_final_{flujo_id}'):
+                    nuevo='OBSERVADA' if not observaciones.empty else 'AUTORIZADA'; ahora=datetime.now().isoformat()
+                    obs_txt='\n'.join([f"{fecha_visible(r['fecha'])} · {r['servicio']} · {r['tipo_opcion']}: {r['observacion']}" for _,r in observaciones.iterrows()]) if not observaciones.empty else ''
+                    with conn.session as ses:
+                        execute_sql(ses,"UPDATE minuta_flujo_coordinacion SET estado=%s,observacion=%s,coordinador=%s,coordinacion_at=%s WHERE id=%s",(nuevo,obs_txt,usuario.get('username'),ahora,int(flujo_id))); ses.commit()
+                    registrar_auditoria(usuario.get('username'),'FINALIZAR_REVISION_COORDINADOR','minuta_flujo_coordinacion',str(flujo_id),'EN_REVISION',nuevo,f'{len(observaciones)} observación(es)')
+                    _notificar_evento('admin_casino',f"[ALEMSI] Minuta {nuevo.lower()} · v{version}",f"<h2>Resultado revisión Coordinador</h2><p><b>Período:</b> {fecha_visible(ini)} → {fecha_visible(fin)}<br><b>Resultado:</b> {nuevo}<br><b>Observaciones:</b> {len(observaciones)}</p><pre>{escape(obs_txt) if obs_txt else 'Sin observaciones'}</pre>")
+                    st.success("Revisión finalizada y devuelta a AdminCasino.") if nuevo=='AUTORIZADA' else st.warning("Revisión observada y devuelta a AdminCasino.")
+                    st.rerun()
+
+    st.divider(); st.markdown("#### Historial de revisiones")
+    hist=conn.query("SELECT fecha_desde,fecha_hasta,version,estado,observacion,enviado_por,enviado_at,coordinador,coordinacion_at FROM minuta_flujo_coordinacion ORDER BY id DESC LIMIT 100",ttl=20)
+    if hist.empty: st.caption("Sin revisiones registradas.")
+    else:
+        hist['estado']=hist['estado'].apply(_estado_flujo_label)
+        st.dataframe(hist.rename(columns={'fecha_desde':'Desde','fecha_hasta':'Hasta','version':'Versión','estado':'Estado','observacion':'Observación','enviado_por':'Enviado por','enviado_at':'Fecha envío','coordinador':'Coordinador','coordinacion_at':'Fecha revisión'}),use_container_width=True,hide_index=True)
 
 def generar_pdf_jornada_alemsi(fecha_iso, df_prod, df_alemsi):
     buffer=BytesIO()
     doc=SimpleDocTemplate(buffer,pagesize=LETTER,rightMargin=14*mm,leftMargin=14*mm,topMargin=14*mm,bottomMargin=14*mm)
     estilos=getSampleStyleSheet(); elems=[]
-    elems += [Paragraph("<b>ALEMSI · Jornada de Producción</b>", estilos["Title"]), Paragraph(f"Fecha: {date.fromisoformat(fecha_iso).strftime('%d/%m/%Y')}", estilos["Normal"]), Spacer(1,6*mm)]
+    _pdf_cabecera_corporativa(elems,'JORNADA DE PRODUCCIÓN',f"Fecha: {date.fromisoformat(fecha_iso).strftime('%d/%m/%Y')}")
     orden=["Desayuno","Almuerzo","Once","Cena"]
     servicios=list(df_prod["servicio"].dropna().astype(str).unique()) if not df_prod.empty else []
     servicios= [x for x in orden if x in servicios] + sorted([x for x in servicios if x not in orden])
@@ -3233,9 +3371,9 @@ def generar_pdf_tabla_alemsi(titulo, periodo, df, columnas=None, total_texto="")
     buffer=BytesIO()
     doc=SimpleDocTemplate(buffer,pagesize=LETTER,rightMargin=13*mm,leftMargin=13*mm,topMargin=13*mm,bottomMargin=13*mm)
     estilos=getSampleStyleSheet()
-    elems=[
-        Paragraph("<font color='#0A2F6B'><b>ALEMSI</b></font>",ParagraphStyle('alemsi_logo',parent=estilos['Title'],fontSize=22,leading=24,alignment=TA_CENTER)),
-        Paragraph(escape(str(titulo)),ParagraphStyle('alemsi_titulo',parent=estilos['Heading1'],fontSize=15,leading=18,alignment=TA_CENTER)),
+    elems=[]
+    _pdf_cabecera_corporativa(elems,escape(str(titulo)),periodo)
+    elems += [
         Paragraph(f"Período / fecha: {escape(str(periodo))}",ParagraphStyle('alemsi_periodo',parent=estilos['Normal'],alignment=TA_CENTER)),
         Spacer(1,5*mm),
     ]
@@ -3314,7 +3452,7 @@ def _render_subbanner_interno(rol):
     activos, creadas, prox = _actividad_sistema_general()
     if str(rol)=='Coordinacion':
         contenido=(
-            f"<div style='font-size:12px;opacity:.9;letter-spacing:.04em'>ALEMSI · COORDINACIÓN</div>"
+            f"<div style='font-size:12px;opacity:.9;letter-spacing:.04em'>ALEMSI · COORDINADOR</div>"
             f"<div style='font-size:22px;font-weight:800;margin:3px 0'>{hoy_txt}</div>"
             f"<div><span>Reservas activas hoy: <strong>{activos}</strong></span></div>"
         )
@@ -3449,53 +3587,40 @@ def render_casino():
                                     st.success("Tarea iniciada.")
                                     st.rerun()
                         with tc2:
-                            resultado_t = st.text_area(
-                                "Resultado / conteo / observaciones",
-                                value=str(tarea_sel.get("resultado") or ""),
-                                key=f"resultado_tarea_inv_{tarea_id}",
-                                placeholder="Registra el resultado del inventario. Esto no modifica el stock oficial.",
-                            )
-                            if st.button(
-                                "📤 Enviar a revisión",
-                                type="primary",
-                                use_container_width=True,
-                                disabled=(str(tarea_sel["estado"]) == "Pendiente" or not resultado_t.strip()),
-                                key=f"enviar_tarea_inv_{tarea_id}",
-                            ):
-                                ahora_t = datetime.now().isoformat()
+                            items_t=conn_tareas.query("SELECT id,codigo_insumo,nombre_articulo,unidad,stock_teorico,conteo_fisico,estado_item,observacion FROM tareas_inventario_items WHERE tarea_id=:t ORDER BY nombre_articulo,id",params={'t':int(tarea_id)},ttl=0)
+                            resultado_t=st.text_area("Observación general / resultado",value=str(tarea_sel.get('resultado') or ''),key=f"resultado_tarea_inv_{tarea_id}",placeholder="Resumen general de la ejecución.")
+                        if str(tarea_sel['estado'])!='Pendiente' and not items_t.empty:
+                            st.markdown("##### ✅ Ejecución ítem por ítem")
+                            edit=items_t.copy()
+                            edit['conteo_fisico']=pd.to_numeric(edit['conteo_fisico'],errors='coerce')
+                            edit=st.data_editor(edit,hide_index=True,use_container_width=True,disabled=['id','codigo_insumo','nombre_articulo','unidad','stock_teorico'],column_config={'estado_item':st.column_config.SelectboxColumn('Estado',options=['PENDIENTE','COMPLETADO','NO_APLICA'],required=True),'conteo_fisico':st.column_config.NumberColumn('Conteo físico',min_value=0.0,step=0.01),'observacion':st.column_config.TextColumn('Observación')},key=f'editor_inv_{tarea_id}')
+                            if st.button("💾 Guardar avance",use_container_width=True,key=f'guardar_inv_{tarea_id}'):
                                 with conn_tareas.session as ses_t:
-                                    execute_sql(
-                                        ses_t,
-                                        "UPDATE tareas_inventario_cocina "
-                                        "SET estado='Enviado a revisión',resultado=%s,completado_por=%s,fecha_completado=%s "
-                                        "WHERE id=%s",
-                                        (
-                                            resultado_t.strip(),
-                                            usuario.get("username"),
-                                            ahora_t,
-                                            int(tarea_id),
-                                        ),
-                                    )
+                                    for _,it in edit.iterrows():
+                                        execute_sql(ses_t,"UPDATE tareas_inventario_items SET conteo_fisico=%s,estado_item=%s,observacion=%s,actualizado_por=%s,actualizado_at=%s WHERE id=%s",(None if pd.isna(it['conteo_fisico']) else float(it['conteo_fisico']),str(it['estado_item']),str(it['observacion'] or ''),usuario.get('username'),datetime.now().isoformat(),int(it['id'])))
                                     ses_t.commit()
-                                registrar_auditoria(
-                                    usuario.get("username"),
-                                    "ENVIAR_TAREA_INVENTARIO_REVISION",
-                                    "tareas_inventario_cocina",
-                                    str(tarea_id),
-                                    str(tarea_sel["estado"]),
-                                    "Enviado a revisión",
-                                    resultado_t.strip(),
-                                )
-                                st.success("Resultado enviado a Administración Casino para revisión.")
-                                st.rerun()
+                                st.success("Avance guardado."); st.rerun()
+                            pendientes_items=int((edit['estado_item'].astype(str)=='PENDIENTE').sum())
+                            if st.button("📤 Finalizar tarea y enviar a revisión",type='primary',use_container_width=True,disabled=(pendientes_items>0),key=f'enviar_tarea_inv_{tarea_id}'):
+                                ahora_t=datetime.now().isoformat()
+                                with conn_tareas.session as ses_t:
+                                    for _,it in edit.iterrows():
+                                        execute_sql(ses_t,"UPDATE tareas_inventario_items SET conteo_fisico=%s,estado_item=%s,observacion=%s,actualizado_por=%s,actualizado_at=%s WHERE id=%s",(None if pd.isna(it['conteo_fisico']) else float(it['conteo_fisico']),str(it['estado_item']),str(it['observacion'] or ''),usuario.get('username'),ahora_t,int(it['id'])))
+                                    execute_sql(ses_t,"UPDATE tareas_inventario_cocina SET estado='Enviado a revisión',resultado=%s,completado_por=%s,fecha_completado=%s WHERE id=%s",(resultado_t.strip(),usuario.get('username'),ahora_t,int(tarea_id))); ses_t.commit()
+                                registrar_auditoria(usuario.get('username'),'ENVIAR_TAREA_INVENTARIO_REVISION','tareas_inventario_cocina',str(tarea_id),str(tarea_sel['estado']),'Enviado a revisión',f'{len(edit)} ítems completados')
+                                _notificar_evento('admin_casino',f"[ALEMSI] Inventario #{tarea_id} enviado a revisión",f"<h2>Tarea de inventario completada</h2><p><b>Responsable:</b> {usuario.get('nombre') or usuario.get('username')}<br><b>Ítems:</b> {len(edit)}</p><p>{escape(resultado_t.strip())}</p>")
+                                st.success("Tarea finalizada y enviada a AdminCasino."); st.rerun()
+                        elif str(tarea_sel['estado'])!='Pendiente':
+                            st.warning("La tarea no contiene ítems asociados. Registra un resultado general para revisión.")
 
             if modulo_cocina == "📅 Ver minuta":
                 st.markdown("#### 📅 Minuta por período")
                 mc1, mc2 = st.columns(2)
                 with mc1:
-                    min_desde = st.date_input("Desde", value=date.today(), key="fecha_minuta_cocina_desde")
+                    coc_ini,coc_fin=_periodo_cocina_default()
+                    min_desde = st.date_input("Desde", value=coc_ini, key="fecha_minuta_cocina_desde")
                 with mc2:
-                    min_hasta = st.date_input("Hasta", value=date.today()+timedelta(days=6), key="fecha_minuta_cocina_hasta")
+                    min_hasta = st.date_input("Hasta", value=coc_fin, key="fecha_minuta_cocina_hasta")
                 if min_hasta < min_desde:
                     st.error("La fecha hasta no puede ser anterior a la fecha desde.")
                 else:
@@ -4579,7 +4704,7 @@ def render_admin():
             # 4. Control General de Reservas
             st.markdown("#### 4️⃣ Control general de reservas")
             df_control = conn.query("SELECT s.id, s.referencia_reserva, s.fecha, s.rut, c.nombre, c.institucion, s.plato_reservado, s.metodo_pago, s.estado_pago, s.estado_consumo, s.precio_aplicado, s.codigo FROM solicitudes s LEFT JOIN comensales c ON s.rut=c.rut ORDER BY s.fecha DESC LIMIT 500", ttl=0)
-            st.dataframe(_tabla_visible(df_control,{"referencia_reserva":"Referencia","fecha":"Fecha","rut":"RUT","nombre":"Nombre","institucion":"Institución","plato_reservado":"Plato","metodo_pago":"Modalidad de pago","estado_pago":"Estado de pago","estado_consumo":"Estado de consumo","precio_aplicado":"Monto","codigo":"Código"},["fecha"]),use_container_width=True,hide_index=True)
+            st.dataframe(_tabla_visible(df_control,{"referencia_reserva":"Código de reserva","fecha":"Fecha","rut":"RUT","nombre":"Nombre","institucion":"Institución","plato_reservado":"Plato","metodo_pago":"Modalidad de pago","estado_pago":"Estado de pago","estado_consumo":"Estado de consumo","precio_aplicado":"Monto","codigo":"Código"},["fecha"]),use_container_width=True,hide_index=True)
             st.metric("Total reservas históricas", len(df_control))
             pdf_control=generar_pdf_tabla_alemsi(
                 "Control operativo de reservas",
@@ -4625,7 +4750,7 @@ def render_admin():
                 if filtro_met!="Todas": fp=fp[fp['metodo_pago'].apply(_normalizar_modalidad_pago)==filtro_met]
                 if filtro_est!="Todos": fp=fp[fp['estado_pago'].astype(str)==filtro_est]
                 df_planilla=fp
-            st.dataframe(_tabla_visible(df_planilla,{"referencia":"Referencia","fecha":"Fecha","servicio":"Servicio","rut":"RUT","nombre":"Nombre","institucion":"Institución","correo":"Correo","plato":"Plato","precio_aplicado":"Monto","metodo_pago":"Modalidad de pago","estado_pago":"Estado de pago","estado_consumo":"Estado de consumo","codigo":"Código"},["fecha","fecha_creacion","fecha_modificacion"]),use_container_width=True,hide_index=True)
+            st.dataframe(_tabla_visible(df_planilla,{"referencia":"Código de reserva","fecha":"Fecha","servicio":"Servicio","rut":"RUT","nombre":"Nombre","institucion":"Institución","correo":"Correo","plato":"Plato","precio_aplicado":"Monto","metodo_pago":"Modalidad de pago","estado_pago":"Estado de pago","estado_consumo":"Estado de consumo","codigo":"Código"},["fecha","fecha_creacion","fecha_modificacion"]),use_container_width=True,hide_index=True)
             if not df_planilla.empty:
                 total_planilla = pd.to_numeric(df_planilla["precio_aplicado"], errors="coerce").fillna(0).sum()
                 c1, c2 = st.columns(2)
@@ -4706,24 +4831,25 @@ def render_admin():
                         detalle_final = detalle_t.strip() or "Realizar inventario físico solicitado por Administración Casino."
                         ahora_t = datetime.now().isoformat()
                         with conn.session as ses_t:
-                            execute_sql(
+                            nueva=execute_sql(
                                 ses_t,
                                 """
                                 INSERT INTO tareas_inventario_cocina
                                 (fecha_creacion,creado_por,asignado_a,fecha_programada,familia,seccion,detalle,prioridad,estado)
-                                VALUES (%s,%s,'Cocina',%s,%s,%s,%s,%s,'Pendiente')
+                                VALUES (%s,%s,'Cocina',%s,%s,%s,%s,%s,'Pendiente') RETURNING id
                                 """,
-                                (
-                                    ahora_t,
-                                    st.session_state.usuario.get("username"),
-                                    fecha_programada.isoformat(),
-                                    None if familia_t == "Todas" else familia_t,
-                                    None if seccion_t == "Todas" else seccion_t,
-                                    detalle_final,
-                                    prioridad,
-                                ),
-                            )
+                                (ahora_t,st.session_state.usuario.get("username"),fecha_programada.isoformat(),None if familia_t == "Todas" else familia_t,None if seccion_t == "Todas" else seccion_t,detalle_final,prioridad),
+                            ).fetchone()
+                            tarea_nueva=int(nueva[0])
+                            filtros=[]; pars=[]
+                            if familia_t!='Todas': filtros.append('familia=%s'); pars.append(familia_t)
+                            if seccion_t!='Todas': filtros.append('seccion=%s'); pars.append(seccion_t)
+                            sql_items='SELECT id,codigo_insumo,nombre_articulo,unidad,stock FROM bodega_inventario'+((' WHERE '+' AND '.join(filtros)) if filtros else '')+' ORDER BY nombre_articulo'
+                            rows=execute_sql(ses_t,sql_items,tuple(pars)).mappings().all()
+                            for it in rows:
+                                execute_sql(ses_t,"INSERT INTO tareas_inventario_items (tarea_id,inventario_id,codigo_insumo,nombre_articulo,unidad,stock_teorico,estado_item) VALUES (%s,%s,%s,%s,%s,%s,'PENDIENTE')",(tarea_nueva,it['id'],it['codigo_insumo'],it['nombre_articulo'],it['unidad'],it['stock']))
                             ses_t.commit()
+                        _notificar_evento('cocina',f"[ALEMSI] Nueva tarea de inventario #{tarea_nueva}",f"<h2>Nueva tarea de inventario</h2><p><b>Fecha:</b> {fecha_programada.strftime('%d/%m/%Y')}<br><b>Prioridad:</b> {prioridad}<br><b>Ítems:</b> {len(rows)}</p><p>{escape(detalle_final)}</p>")
                         registrar_auditoria(
                             st.session_state.usuario.get("username"),
                             "CREAR_TAREA_INVENTARIO_COCINA",
@@ -4785,37 +4911,21 @@ def render_admin():
                             rr = df_tareas_admin[
                                 df_tareas_admin["id"].astype(int) == int(rid)
                             ].iloc[0]
-                            st.info(str(rr.get("resultado") or "Sin resultado informado."))
-                            if st.button(
-                                "✅ Cerrar tarea revisada",
-                                type="primary",
-                                use_container_width=True,
-                                key=f"cerrar_tarea_inv_{rid}",
-                            ):
-                                ahora_r = datetime.now().isoformat()
-                                with conn.session as ses_r:
-                                    execute_sql(
-                                        ses_r,
-                                        "UPDATE tareas_inventario_cocina "
-                                        "SET estado='Cerrado',revisado_por=%s,fecha_revision=%s WHERE id=%s",
-                                        (
-                                            st.session_state.usuario.get("username"),
-                                            ahora_r,
-                                            int(rid),
-                                        ),
-                                    )
-                                    ses_r.commit()
-                                registrar_auditoria(
-                                    st.session_state.usuario.get("username"),
-                                    "CERRAR_TAREA_INVENTARIO_COCINA",
-                                    "tareas_inventario_cocina",
-                                    str(rid),
-                                    "Enviado a revisión",
-                                    "Cerrado",
-                                    "",
-                                )
-                                st.success("Tarea cerrada. El registro queda en la trazabilidad.")
-                                st.rerun()
+                            st.info(str(rr.get("resultado") or "Sin resultado general."))
+                            items_r=conn.query("SELECT codigo_insumo,nombre_articulo,unidad,stock_teorico,conteo_fisico,(COALESCE(conteo_fisico,stock_teorico)-COALESCE(stock_teorico,0)) AS diferencia,estado_item,observacion FROM tareas_inventario_items WHERE tarea_id=:t ORDER BY nombre_articulo",params={'t':int(rid)},ttl=0)
+                            if not items_r.empty: st.dataframe(items_r,use_container_width=True,hide_index=True)
+                            decision_r=st.radio("Resolución",['APROBAR Y CERRAR','OBSERVAR Y DEVOLVER A COCINA'],horizontal=True,key=f'dec_inv_{rid}')
+                            obs_r=st.text_area("Observación de revisión",key=f'obs_inv_{rid}',placeholder='Obligatoria al devolver a Cocina.')
+                            if st.button("Guardar resolución",type='primary',use_container_width=True,key=f"cerrar_tarea_inv_{rid}"):
+                                if decision_r.startswith('OBSERVAR') and not obs_r.strip(): st.error("Escribe la observación para devolver la tarea.")
+                                else:
+                                    ahora_r=datetime.now().isoformat(); usuario_r=st.session_state.usuario.get('username'); nuevo='Cerrado' if decision_r.startswith('APROBAR') else 'En proceso'
+                                    with conn.session as ses_r:
+                                        execute_sql(ses_r,"UPDATE tareas_inventario_cocina SET estado=%s,revisado_por=%s,fecha_revision=%s WHERE id=%s",(nuevo,usuario_r,ahora_r,int(rid))); ses_r.commit()
+                                    registrar_auditoria(usuario_r,'RESOLVER_TAREA_INVENTARIO','tareas_inventario_cocina',str(rid),'Enviado a revisión',nuevo,obs_r.strip())
+                                    _notificar_evento('cocina',f"[ALEMSI] Resultado tarea de inventario #{rid}",f"<h2>{'Tarea cerrada' if nuevo=='Cerrado' else 'Tarea observada'}</h2><p>{escape(obs_r.strip() or 'Sin observaciones')}</p>")
+                                    st.success("Tarea cerrada y registrada.") if nuevo=='Cerrado' else st.warning("Tarea devuelta a Cocina para corrección.")
+                                    st.rerun()
 
         if modulo_admin == "🍽️ Minutas":
             flash_minuta = st.session_state.pop("_flash_minuta", None)
@@ -4836,7 +4946,8 @@ def render_admin():
                 else:
                     fechas_vis=[ini+timedelta(days=i) for i in range((fin-ini).days+1)]
                     _render_minuta_semanal(df_min,fechas_visibles=fechas_vis,titulo_personalizado=f"📅 {ini.strftime('%d/%m/%Y')} → {fin.strftime('%d/%m/%Y')}")
-                    st.dataframe(df_min[["fecha","servicio","tipo_opcion","plato","estado"]].rename(columns={"fecha":"Fecha","servicio":"Servicio","tipo_opcion":"Opción","plato":"Plato","estado":"Estado"}),use_container_width=True,hide_index=True)
+                    with st.expander("📋 Ver detalle tabular de la minuta",expanded=False):
+                        st.dataframe(df_min[["fecha","servicio","tipo_opcion","plato","estado"]].rename(columns={"fecha":"Fecha","servicio":"Servicio","tipo_opcion":"Opción","plato":"Plato","estado":"Estado"}),use_container_width=True,hide_index=True)
 
                     conflictos=[]
                     for (fconf,sconf),grp in df_min.groupby(["fecha","servicio"]):
@@ -5468,7 +5579,58 @@ def render_admin():
 
         if modulo_admin == "⚖️ Excepciones":
             conn=get_conn()
-            st.markdown("#### ⏱️ Excepción de reserva")
+            st.markdown("#### ⚙️ Reglas operativas de reservas")
+            st.caption("Parametrización funcional editable exclusivamente por AdminCasino. Los cambios se aplican en tiempo de ejecución y quedan auditados.")
+            reglas=_reglas_reserva()
+            with st.form("reglas_reserva_admincasino"):
+                r1,r2,r3=st.columns(3)
+                with r1: ant_h=st.number_input("Anticipación mínima para reservar (horas)",min_value=0,max_value=240,value=int(reglas['anticipacion_reserva_horas']),step=1)
+                with r2: can_h=st.number_input("Cancelación directa hasta (horas antes)",min_value=0,max_value=240,value=int(reglas['cancelacion_directa_horas']),step=1)
+                with r3: max_d=st.number_input("Máximo días consecutivos",min_value=1,max_value=31,value=int(reglas['max_dias_consecutivos']),step=1)
+                exc_on=st.checkbox("Permitir solicitudes excepcionales fuera de plazo",value=bool(reglas['excepciones_habilitadas']))
+                guardar_reg=st.form_submit_button("Guardar reglas de reserva",type="primary",use_container_width=True)
+            if guardar_reg:
+                usuario_reg=st.session_state.usuario.get('username'); ahora_reg=datetime.now().isoformat()
+                anterior=json.dumps(reglas,ensure_ascii=False)
+                with conn.session as ses:
+                    execute_sql(ses,"UPDATE configuracion_reservas SET anticipacion_reserva_horas=%s,cancelacion_directa_horas=%s,max_dias_consecutivos=%s,excepciones_habilitadas=%s,actualizado_por=%s,actualizado_at=%s WHERE id=1",(int(ant_h),int(can_h),int(max_d),1 if exc_on else 0,usuario_reg,ahora_reg)); ses.commit()
+                registrar_auditoria(usuario_reg,'ACTUALIZAR_REGLAS_RESERVA','configuracion_reservas','1',anterior,json.dumps({'anticipacion_reserva_horas':int(ant_h),'cancelacion_directa_horas':int(can_h),'max_dias_consecutivos':int(max_d),'excepciones_habilitadas':1 if exc_on else 0},ensure_ascii=False),'Parámetros operativos')
+                st.success("Reglas actualizadas y aplicadas al circuito de reservas.")
+                st.rerun()
+
+            st.divider()
+            st.markdown("#### ⚖️ Solicitudes excepcionales de comensales")
+            pend=conn.query("SELECT id,codigo_reserva,rut,fecha_servicio,servicio,motivo_tipo,motivo_detalle,estado,solicitado_at FROM solicitudes_excepcion_reserva WHERE estado='PENDIENTE_ADMIN_CASINO' ORDER BY id",ttl=0)
+            if pend.empty:
+                st.caption("Sin solicitudes excepcionales pendientes.")
+            else:
+                st.dataframe(_tabla_visible(pend,{"id":"N.º","codigo_reserva":"Código","rut":"RUT","fecha_servicio":"Fecha","servicio":"Servicio","motivo_tipo":"Motivo","motivo_detalle":"Detalle","solicitado_at":"Solicitada"},["fecha_servicio","solicitado_at"]),use_container_width=True,hide_index=True)
+                exc_id=selector_neutro("Solicitud a resolver",pend['id'].astype(int).tolist(),key='exc_resolver_id',format_func=lambda x:f"#{x} · {pend.loc[pend['id']==x,'codigo_reserva'].iloc[0]} · {pend.loc[pend['id']==x,'servicio'].iloc[0]}")
+                if exc_id is not None:
+                    resol=st.radio("Decisión",["APROBAR","RECHAZAR"],horizontal=True,key=f"dec_exc_{exc_id}")
+                    tratamiento=st.selectbox("Tratamiento operativo",["NO CONSUMIDO AUTORIZADO","PRODUCIDO Y REASIGNADO","PRODUCIDO NO RECUPERABLE","CONSUMIDO / NO CORRESPONDE ANULAR","SIN EFECTO FINANCIERO"],key=f"trat_exc_{exc_id}")
+                    obs=st.text_area("Resolución / observación",key=f"obs_exc_{exc_id}")
+                    conf=st.checkbox("Confirmo la resolución de esta excepción",key=f"conf_exc_admin_{exc_id}")
+                    if st.button("Resolver solicitud excepcional",type="primary",use_container_width=True,key=f"btn_exc_admin_{exc_id}"):
+                        if not conf:
+                            st.warning("Confirma la resolución antes de continuar.")
+                        else:
+                            fila=pend[pend['id'].astype(int)==int(exc_id)].iloc[0]; ahora=datetime.now().isoformat(); usuario=st.session_state.usuario.get('username')
+                            nuevo='APROBADA' if resol=='APROBAR' else 'RECHAZADA'
+                            fin_estado='PENDIENTE_FINANZAS' if (nuevo=='APROBADA' and tratamiento in ['NO CONSUMIDO AUTORIZADO','PRODUCIDO NO RECUPERABLE']) else 'NO_APLICA'
+                            with conn.session as ses:
+                                execute_sql(ses,"UPDATE solicitudes_excepcion_reserva SET estado=%s,resuelto_por=%s,resuelto_at=%s,resolucion=%s,efecto_financiero=%s,finanzas_estado=%s WHERE id=%s",(nuevo,usuario,ahora,obs.strip(),tratamiento,fin_estado,int(exc_id)))
+                                if nuevo=='APROBADA' and tratamiento=='NO CONSUMIDO AUTORIZADO':
+                                    execute_sql(ses,"UPDATE solicitudes SET estado_reserva='ANULADA_EXCEPCIONAL',fecha_modificacion=%s,modificado_por=%s WHERE rut=%s AND codigo_reserva=%s AND fecha=%s AND servicio=%s AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA'",(ahora,usuario,str(fila['rut']),str(fila['codigo_reserva']),str(fila['fecha_servicio']),str(fila['servicio'])))
+                                ses.commit()
+                            registrar_auditoria(usuario,'RESOLVER_EXCEPCION_RESERVA','solicitudes_excepcion_reserva',str(exc_id),'PENDIENTE_ADMIN_CASINO',nuevo,f'{tratamiento} · {obs.strip()}')
+                            if fin_estado=='PENDIENTE_FINANZAS':
+                                _notificar_evento('finanzas',f"[ALEMSI] Excepción aprobada pendiente Finanzas · {fila['codigo_reserva']}",f"<h2>Excepción aprobada</h2><p><b>Código:</b> {fila['codigo_reserva']}<br><b>RUT:</b> {fila['rut']}<br><b>Servicio:</b> {fila['servicio']} · {fecha_visible(fila['fecha_servicio'])}<br><b>Tratamiento:</b> {tratamiento}</p>")
+                            st.success("Solicitud resuelta y trazabilidad actualizada.")
+                            st.rerun()
+
+            st.divider()
+            st.markdown("#### ⏱️ Excepción de reserva administrativa")
             st.caption("Abre temporalmente la ventana de reserva normal. No crea raciones, no valida pagos y no genera una estructura paralela.")
             rut_exc_raw=st.text_input("RUT del comensal",placeholder="Ej.: 12.345.678-5",key="exc_res_rut")
             rut_exc=normalizar_rut(rut_exc_raw) if rut_exc_raw.strip() else ""
@@ -5848,7 +6010,7 @@ def render_admin():
                     df_aud["fecha"] = pd.to_datetime(df_aud["fecha"], errors="coerce").dt.strftime("%d/%m/%Y %H:%M:%S").fillna(df_aud["fecha"].astype(str))
                 st.dataframe(_tabla_visible(df_aud,{
                     "fecha":"Fecha / hora","usuario":"Usuario","accion":"Acción","entidad":"Entidad",
-                    "referencia":"Referencia","valor_anterior":"Anterior","valor_nuevo":"Nuevo","motivo":"Motivo"
+                    "referencia":"Código de reserva","valor_anterior":"Anterior","valor_nuevo":"Nuevo","motivo":"Motivo"
                 }),use_container_width=True,hide_index=True)
                 if not df_login.empty:
                     st.download_button(

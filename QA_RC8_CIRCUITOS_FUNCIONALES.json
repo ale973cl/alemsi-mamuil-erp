@@ -1,0 +1,30 @@
+{
+  "version": "ALEMSI v2.1.3.45-RC8",
+  "checks": {
+    "compile": true,
+    "ast": true,
+    "common_intacto": true,
+    "bodega_intacta": true,
+    "reglas_parametrizadas": true,
+    "max_consecutivos": true,
+    "seleccion_explicita": true,
+    "codigo_publico": true,
+    "excepcion_comensal": true,
+    "excepcion_admin": true,
+    "notifica_finanzas": true,
+    "lazy_minutas": true,
+    "minutas_no_despublica": true
+  },
+  "circuitos_a_probar": [
+    "AdminCasino cambia 48h/24h/7 días -> Comensal recibe reglas inmediatamente.",
+    "Comensal selecciona un día -> debe declarar Consumiré/No consumiré en todos los servicios y al menos un plato.",
+    "Máximo consecutivo bloquea por parámetro.",
+    "Código de reserva corto visible; referencia técnica sigue interna.",
+    "Cancelación directa dentro de ventana conserva historial.",
+    "Fuera de ventana -> Solicitar excepción -> AdminCasino aprueba/rechaza -> Finanzas notificada si corresponde.",
+    "Pago pendiente bloquea nuevas reservas sin ocultar ni borrar la reserva original.",
+    "Minutas: auditar/enviar no cambia PUBLICABLE; Coordinación sigue separada.",
+    "AdminCasino > Minutas usa carga diferida para detalle tabular.",
+    "Bodega no modificada."
+  ]
+}

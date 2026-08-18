@@ -1,0 +1,33 @@
+{
+  "version": "ALEMSI v2.1.3.46-RC9",
+  "checks": {
+    "compile": true,
+    "ast": true,
+    "common_intacto": true,
+    "deuda_solo_pasada": true,
+    "codigo_comercial_insert": true,
+    "codigo_visible_resultado": true,
+    "encuesta_tres_dimensiones": true,
+    "comentario_notifica_cocina": true,
+    "coordinador_nombre": true,
+    "coord_revision_diaria": true,
+    "coord_periodo_viernes_viernes": true,
+    "cocina_periodo_viernes_jueves": true,
+    "inventario_items": true,
+    "motor_correo_fallback": true,
+    "pdf_mascota": true,
+    "minuta_no_despublica": true
+  },
+  "circuitos_prueba_usuario": [
+    "RUT nuevo sin servicios pasados: puede reservar; reserva futura pendiente NO aparece como deuda vencida.",
+    "Código de reserva corto visible en confirmación, Mis reservas, correo y PDF.",
+    "AdminCasino cambia cut-off/cancelación/máximo días: regla se aplica sin editar código.",
+    "Mis reservas: cancelación directa o Solicitar excepción según ventana; AdminCasino resuelve; Finanzas recibe si corresponde.",
+    "Coordinador: vista general viernes-viernes; revisión día a día persistente; solo finaliza al completar todo.",
+    "Cocina: vista semanal por defecto viernes-jueves.",
+    "Inventario: AdminCasino crea tarea con ítems; Cocina ejecuta ítem a ítem; envía; AdminCasino aprueba o devuelve; queda historial.",
+    "Encuesta Casino: solo Comida/Atención/Limpieza; comentario genera correo a Cocina; APP se mantiene temporalmente.",
+    "PDFs principales: logo ALEMSI + Alencín sin alterar datos del reporte.",
+    "Minutas: revisión no cambia estado PUBLICABLE; Bodega/Producción mantienen lógica existente."
+  ]
+}
