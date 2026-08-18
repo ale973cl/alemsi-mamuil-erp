@@ -1,4 +1,4 @@
-# ALEMSI v2.1.3.41-RC4 · Minutas/Perfiles/Visualización - estabilización de confirmaciones, permisos y validación de minutas
+# ALEMSI v2.1.3.42-RC5 · Reservas/Pagos/Minutas - estabilización de confirmaciones, permisos y validación de minutas
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -609,6 +609,8 @@ if token_q:
                 "Comprobante recibido. Google Drive no estaba disponible/configurado, "
                 "por lo que se guardó temporalmente en PostgreSQL para no perder la carga."
             )
+        # FIN-REFRESH-RC5: mostrar inmediatamente el estado recién guardado.
+        st.rerun()
         st.rerun()
     if comprobante_cargado:
         _render_encuestas_portal(conn, token_q, ref, str(df_token.iloc[0]['rut']), str(df_token.iloc[0]['institucion']))
@@ -1411,7 +1413,11 @@ def _render_minuta_semanal(df_minuta, fecha_base=None, titulo=True, fechas_visib
 
 
 def _deuda_vencida_bloqueante(rut):
-    """RES-PAGO-40: bloquea nuevas reservas comerciales solo por servicios ya vencidos e impagos."""
+    """RES-PAGO-RC5: bloquea nuevas reservas si existe una reserva comercial activa con pago aún no validado.
+
+    Pago y reserva son estados independientes: una reserva futura pagada continúa ACTIVA
+    para Cocina/Producción hasta consumo, cancelación o cierre correspondiente.
+    """
     try:
         conn = get_conn()
         return conn.query(
@@ -1425,7 +1431,6 @@ def _deuda_vencida_bloqueante(rut):
             FROM solicitudes
             WHERE rut=:rut
               AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
-              AND fecha < :hoy
               AND COALESCE(precio_aplicado,precio,0) > 0
               AND COALESCE(tipo_registro,'RESERVA_COMERCIAL')='RESERVA_COMERCIAL'
               AND LOWER(TRIM(COALESCE(estado_pago,'Pendiente'))) NOT IN (
@@ -1434,12 +1439,11 @@ def _deuda_vencida_bloqueante(rut):
             GROUP BY referencia_reserva
             ORDER BY MIN(fecha), referencia_reserva
             """,
-            params={"rut": normalizar_rut_db(rut), "hoy": date.today().isoformat()},
+            params={"rut": normalizar_rut_db(rut)},
             ttl=0,
         )
     except Exception:
         return pd.DataFrame()
-
 
 def _requerimiento_receta(cantidad_base, porciones, merma_pct=0, margen_pct=0):
     """Cantidad bruta operacional: base por ración -> merma -> margen de producción."""
@@ -1849,7 +1853,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                 """, unsafe_allow_html=True)
                 st.caption(
                     "Puedes elegir un día, fechas consecutivas o fechas intercaladas. "
-                    "Los días pasados y los días sin minuta no están disponibles."
+                    "La reserva debe realizarse como mínimo para el día siguiente. Hoy y los días sin minuta no están disponibles."
                 )
 
                 if "fechas_calendario" not in st.session_state:
@@ -1871,7 +1875,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                         with columna:
                             st.markdown('<span class="alemsi-cal-cell"></span>', unsafe_allow_html=True)
                             pertenece_mes = dia.month == hoy.month
-                            disponible = pertenece_mes and dia >= hoy and (
+                            disponible = pertenece_mes and dia >= (hoy + timedelta(days=1)) and (
                                 not fechas_con_minuta or dia.isoformat() in fechas_con_minuta
                             )
                             if not pertenece_mes:
@@ -1889,7 +1893,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                     args=(fecha_iso,),
                                 )
                             else:
-                                motivo = "Pasado" if dia < hoy else "Sin minuta"
+                                motivo = "Fuera de plazo" if dia <= hoy else "Sin minuta"
                                 st.markdown(
                                     f"<div class='alemsi-cal-disabled'>"
                                     f"<b>{dia.day}</b><br><small>{motivo}</small></div>",
@@ -2150,6 +2154,20 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                     if confirmar:
                         if not es_alemsi and not aceptar:
                             st.error("Debes confirmar que revisaste la reserva.")
+                            st.stop()
+
+                        # RES-24H-RC5: protección backend. La UI no es suficiente.
+                        fecha_minima_reserva = date.today() + timedelta(days=1)
+                        fechas_fuera_plazo = sorted({
+                            f_iso for f_iso, *_ in detalle
+                            if date.fromisoformat(f_iso) < fecha_minima_reserva
+                        })
+                        if fechas_fuera_plazo:
+                            st.error(
+                                "No se puede reservar para hoy ni para fechas anteriores. "
+                                "La fecha mínima disponible es "
+                                + fecha_minima_reserva.strftime("%d/%m/%Y") + "."
+                            )
                             st.stop()
 
                         conn = get_conn()
@@ -4820,7 +4838,7 @@ def render_admin():
                             "🔎 Revisar / auditar minuta",
                             use_container_width=True,
                             key="auditar_minuta_periodo",
-                            disabled=(bool(conflictos) or not puede_gestionar_flujo_minuta)
+                            disabled=(not puede_gestionar_flujo_minuta)
                         ):
                             with conn.session as ses:
                                 execute_sql(
@@ -4850,7 +4868,6 @@ def render_admin():
                         envio_bloqueado = (
                             not puede_gestionar_flujo_minuta
                             or not tiene_minuta
-                            or bool(conflictos)
                             or estado_coord in ["EN_REVISION","AUTORIZADA","PUBLICADA"]
                         )
                         if st.button(
@@ -4883,8 +4900,7 @@ def render_admin():
                     with ab3:
                         publicar_habilitado = (
                             puede_gestionar_flujo_minuta
-                            and estado_coord=="AUTORIZADA"
-                            and not bool(conflictos)
+                            and estado_coord=="AUTORIZADA" 
                         )
                         if st.button(
                             "✅ Publicar período",
@@ -4933,7 +4949,7 @@ def render_admin():
                             st.rerun()
 
                     if conflictos:
-                        st.warning("La validación por Coordinación está visible, pero el envío queda bloqueado hasta corregir los conflictos indicados arriba.")
+                        st.warning("Alerta preventiva: se detectaron coincidencias entre opciones. Puedes revisar, enviar a Coordinación y continuar el flujo; la alerta no bloquea la minuta.")
                     elif not tiene_minuta:
                         st.info("Carga primero una minuta dentro del período seleccionado.")
                     elif estado_coord=="EN_REVISION":

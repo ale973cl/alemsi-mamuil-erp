@@ -1,0 +1,29 @@
+{
+  "version": "ALEMSI v2.1.3.42-RC5",
+  "checks": {
+    "compile_python": true,
+    "ast_parse": true,
+    "common_intacto": true,
+    "bodega_admin_intacta": true,
+    "calendario_bloquea_hoy": true,
+    "backend_bloquea_hoy": true,
+    "pago_pendiente_bloquea_nuevas": true,
+    "reserva_pago_independientes": true,
+    "minuta_alerta_no_bloquea": true,
+    "comprobante_refresco": true
+  },
+  "pruebas_recomendadas": [
+    "RUT 14.022.379-4: hoy debe aparecer Fuera de plazo y backend debe rechazarlo.",
+    "Crear reserva futura: debe quedar ACTIVA.",
+    "Subir comprobante: debe aparecer inmediatamente como recibido / pendiente de validación.",
+    "Mientras el pago no esté validado: nuevas reservas comerciales deben quedar bloqueadas.",
+    "Validar pago en Finanzas: debe liberar nuevas reservas sin desactivar la reserva futura ya pagada.",
+    "Reserva futura PAGADA debe seguir contando para Cocina/Producción.",
+    "AdminCasino: alerta de coincidencia de minuta no debe bloquear Revisar/Auditar ni Enviar a Coordinación.",
+    "Coordinación: debe recibir la versión EN_REVISION y poder Observar/Autorizar."
+  ],
+  "fuera_de_alcance": [
+    "Bodega: sin cambios",
+    "Migración Vercel: no incluida"
+  ]
+}
