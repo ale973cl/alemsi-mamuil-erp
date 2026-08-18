@@ -1,0 +1,29 @@
+{
+  "version": "ALEMSI v2.1.3.43-RC6",
+  "checks": {
+    "python_compile": true,
+    "ast_parse": true,
+    "common_intacto": true,
+    "bodega_admin_intacta": true,
+    "48h_calendario": true,
+    "48h_backend_por_servicio": true,
+    "alemsi_en_actividad_hoy": true,
+    "dashboard_nombres_distintos": true,
+    "minuta_alerta_no_bloqueante": true,
+    "minuta_interna_recuperada": true,
+    "rerun_comprobante_unico": true
+  },
+  "pruebas_criticas": [
+    "Reserva: hoy y mañana no seleccionables; cada servicio debe conservar mínimo 48 h reales al confirmar.",
+    "ALEMSI: una declaración creada o modificada hoy debe incrementar 'Actividad de reservas hoy' sin duplicar raciones.",
+    "Dashboard: 'Reservas comerciales activas' no debe confundirse con 'Actividad de reservas hoy'.",
+    "Cocina > Ver minuta: debe seguir mostrando BORRADOR/AUDITADA durante revisión interna.",
+    "Comensal: solo debe ver minuta PUBLICABLE.",
+    "AdminCasino: alerta de platos repetidos es informativa y no bloquea Enviar a Coordinación.",
+    "Comprobante: tras carga debe refrescar una sola vez y mostrar estado actualizado."
+  ],
+  "fuera_de_alcance": [
+    "Bodega sin cambios",
+    "Migración Vercel todavía no incluida"
+  ]
+}

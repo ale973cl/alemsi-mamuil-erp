@@ -1,4 +1,4 @@
-# ALEMSI v2.1.3.42-RC5 · Reservas/Pagos/Minutas - estabilización de confirmaciones, permisos y validación de minutas
+# ALEMSI v2.1.3.43-RC6 · 48H/Dashboard/Minutas - estabilización de confirmaciones, permisos y validación de minutas
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -609,8 +609,7 @@ if token_q:
                 "Comprobante recibido. Google Drive no estaba disponible/configurado, "
                 "por lo que se guardó temporalmente en PostgreSQL para no perder la carga."
             )
-        # FIN-REFRESH-RC5: mostrar inmediatamente el estado recién guardado.
-        st.rerun()
+        # FIN-REFRESH-RC6: mostrar inmediatamente el estado recién guardado.
         st.rerun()
     if comprobante_cargado:
         _render_encuestas_portal(conn, token_q, ref, str(df_token.iloc[0]['rut']), str(df_token.iloc[0]['institucion']))
@@ -1024,8 +1023,8 @@ def _render_dashboard_integral_alemsi(conn=None, *, key_prefix="dash"):
 
     st.markdown("#### Resumen general")
     c1,c2,c3,c4,c5 = st.columns(5)
-    c1.metric("Reservas totales", int(reservas["referencia_reserva"].nunique()))
-    c2.metric("Próximas 14 días", int(proximas["referencia_reserva"].nunique()))
+    c1.metric("Reservas comerciales activas", int(reservas["referencia_reserva"].nunique()))
+    c2.metric("Reservas comerciales · próximos 14 días", int(proximas["referencia_reserva"].nunique()))
     c3.metric("Pagadas", int(es_pagado.sum()))
     c4.metric("Por pagar", int((~es_pagado).sum()))
     c5.metric("Valorización", formato_clp(reservas["monto"].sum()))
@@ -1057,7 +1056,7 @@ def _render_dashboard_integral_alemsi(conn=None, *, key_prefix="dash"):
         sv = servicios.copy()
         sv["fecha_dt"] = pd.to_datetime(sv["fecha"], errors="coerce").dt.date
 
-        st.markdown("#### Próximas reservas · 14 días")
+        st.markdown("#### Servicios de reservas comerciales · próximos 14 días")
         prox_sv = sv[
             sv["fecha_dt"].notna() & (sv["fecha_dt"] >= hoy) & (sv["fecha_dt"] <= hasta_14)
         ].copy()
@@ -1853,7 +1852,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                 """, unsafe_allow_html=True)
                 st.caption(
                     "Puedes elegir un día, fechas consecutivas o fechas intercaladas. "
-                    "La reserva debe realizarse como mínimo para el día siguiente. Hoy y los días sin minuta no están disponibles."
+                    "La reserva exige una anticipación mínima de 48 horas. Hoy, mañana y los días sin minuta no están disponibles."
                 )
 
                 if "fechas_calendario" not in st.session_state:
@@ -1875,7 +1874,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                         with columna:
                             st.markdown('<span class="alemsi-cal-cell"></span>', unsafe_allow_html=True)
                             pertenece_mes = dia.month == hoy.month
-                            disponible = pertenece_mes and dia >= (hoy + timedelta(days=1)) and (
+                            disponible = pertenece_mes and dia >= (hoy + timedelta(days=2)) and (
                                 not fechas_con_minuta or dia.isoformat() in fechas_con_minuta
                             )
                             if not pertenece_mes:
@@ -1893,7 +1892,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                     args=(fecha_iso,),
                                 )
                             else:
-                                motivo = "Fuera de plazo" if dia <= hoy else "Sin minuta"
+                                motivo = "Fuera de plazo 48 h" if dia < (hoy + timedelta(days=2)) else "Sin minuta"
                                 st.markdown(
                                     f"<div class='alemsi-cal-disabled'>"
                                     f"<b>{dia.day}</b><br><small>{motivo}</small></div>",
@@ -1973,6 +1972,9 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                             tipos_permitidos = {"OPCION 1", "OPCIÓN 1", "HIPOCALORICO", "HIPOCALÓRICO", "TIPO R"} if tipo_alemsi == "paso" else {"OPCION 1", "OPCIÓN 1", "OPCION 2", "OPCIÓN 2", "HIPOCALORICO", "HIPOCALÓRICO", "TIPO R"}
                             disponibles = 0
                             for servicio in servicios_internos:
+                                if not reserva_modificable(f_iso, servicio):
+                                    st.caption(f"{servicio}: fuera del plazo mínimo de 48 horas.")
+                                    continue
                                 grupo = filas_fecha[filas_fecha["servicio"].astype(str) == servicio].copy() if not filas_fecha.empty else pd.DataFrame()
                                 if grupo.empty:
                                     continue
@@ -2021,6 +2023,12 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                 st.warning("No existe minuta configurada para esta fecha.")
                             servicios_visibles = [x for x in orden_servicios if opciones_por_servicio.get(x)]
                             servicios_visibles += sorted([x for x in opciones_por_servicio if x not in servicios_visibles])
+                            servicios_fuera_48h = [s for s in servicios_visibles if not reserva_modificable(f_iso, s)]
+                            servicios_visibles = [s for s in servicios_visibles if reserva_modificable(f_iso, s)]
+                            if servicios_fuera_48h:
+                                st.caption(
+                                    "Fuera del plazo mínimo de 48 h: " + ", ".join(servicios_fuera_48h) + "."
+                                )
                             for servicio in servicios_visibles:
                                 registros = opciones_por_servicio.get(servicio, [])
                                 icono = iconos_servicio.get(servicio, "🍴")
@@ -2156,17 +2164,17 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                             st.error("Debes confirmar que revisaste la reserva.")
                             st.stop()
 
-                        # RES-24H-RC5: protección backend. La UI no es suficiente.
-                        fecha_minima_reserva = date.today() + timedelta(days=1)
-                        fechas_fuera_plazo = sorted({
-                            f_iso for f_iso, *_ in detalle
-                            if date.fromisoformat(f_iso) < fecha_minima_reserva
-                        })
-                        if fechas_fuera_plazo:
+                        # RES-48H-RC6: protección backend por fecha + hora real del servicio.
+                        fuera_plazo_48h = []
+                        for f_iso, _dnom, servicio, *_resto in detalle:
+                            if not reserva_modificable(f_iso, servicio):
+                                fuera_plazo_48h.append(
+                                    f"{servicio} · {date.fromisoformat(f_iso).strftime('%d/%m/%Y')}"
+                                )
+                        if fuera_plazo_48h:
                             st.error(
-                                "No se puede reservar para hoy ni para fechas anteriores. "
-                                "La fecha mínima disponible es "
-                                + fecha_minima_reserva.strftime("%d/%m/%Y") + "."
+                                "La reserva exige al menos 48 horas de anticipación. "
+                                "Fuera de plazo: " + ", ".join(sorted(set(fuera_plazo_48h))) + "."
                             )
                             st.stop()
 
@@ -2767,6 +2775,27 @@ def _cargar_demanda_produccion_fecha(fecha_iso):
     return df_prod, df_alemsi
 
 
+def _get_minutas_internas_rango(fecha_inicio, fecha_fin):
+    """Vista interna de minuta: BORRADOR/AUDITADA/AUTORIZADA/PUBLICABLE sin exponer borradores al comensal."""
+    try:
+        return get_conn().query(
+            """
+            SELECT id,fecha,dia_semana,servicio,tipo_opcion,plato,activo,
+                   COALESCE(estado,'BORRADOR') AS estado
+            FROM minutas
+            WHERE COALESCE(activo,1)=1
+              AND fecha>=:i AND fecha<=:f
+            ORDER BY fecha,
+                     CASE servicio WHEN 'Desayuno' THEN 1 WHEN 'Almuerzo' THEN 2
+                                   WHEN 'Once' THEN 3 WHEN 'Cena' THEN 4 ELSE 5 END,
+                     tipo_opcion,id
+            """,
+            params={"i":str(fecha_inicio),"f":str(fecha_fin)}, ttl=0,
+        )
+    except Exception:
+        return pd.DataFrame()
+
+
 def _render_reporte_produccion_fecha(fecha_iso, titulo=True, mostrar_nominal=True):
     """Reporte reutilizable por Cocina, Administración, Gerencia y AdminTotal."""
     df_prod, df_alemsi = _cargar_demanda_produccion_fecha(fecha_iso)
@@ -3240,29 +3269,44 @@ def generar_pdf_tabla_alemsi(titulo, periodo, df, columnas=None, total_texto="")
 
 
 def _actividad_sistema_general():
-    """Pulso general interno. Solo datos agregados; no expone personas, pagos ni instituciones."""
+    """Pulso agregado interno: incluye reservas comerciales, coordinadores y consumo interno ALEMSI."""
     hoy = date.today()
     hasta = hoy + timedelta(days=13)
     try:
         df = get_conn().query(
             """
             SELECT
-              COUNT(DISTINCT CASE WHEN fecha=:hoy AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA' THEN rut END) AS comensales_hoy,
-              COUNT(DISTINCT CASE WHEN LEFT(COALESCE(fecha_creacion,''),10)=:hoy THEN referencia_reserva END) AS reservas_creadas_hoy,
-              COUNT(DISTINCT CASE WHEN fecha>=:hoy AND fecha<=:hasta AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
-                                  THEN rut || '|' || fecha || '|' || servicio END) AS servicios_14d
+              COUNT(DISTINCT CASE
+                    WHEN fecha=:hoy AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
+                    THEN rut END) AS comensales_hoy,
+
+              COUNT(DISTINCT CASE
+                    WHEN LEFT(COALESCE(NULLIF(fecha_modificacion,''),fecha_creacion,''),10)=:hoy
+                    THEN COALESCE(
+                        NULLIF(TRIM(referencia_reserva),''),
+                        rut || '|' || LEFT(COALESCE(NULLIF(fecha_modificacion,''),fecha_creacion,''),16)
+                    )
+                    END) AS actividad_reservas_hoy,
+
+              COUNT(DISTINCT CASE
+                    WHEN fecha>=:hoy AND fecha<=:hasta
+                     AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
+                    THEN rut || '|' || fecha || '|' || servicio END) AS servicios_14d
             FROM solicitudes
-            WHERE COALESCE(tipo_registro,'RESERVA_COMERCIAL')='RESERVA_COMERCIAL'
+            WHERE COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
             """,
-            params={"hoy": hoy.isoformat(), "hasta": hasta.isoformat()}, ttl=15,
+            params={"hoy": hoy.isoformat(), "hasta": hasta.isoformat()}, ttl=0,
         )
         if not df.empty:
             r=df.iloc[0]
-            return int(r.get('comensales_hoy') or 0), int(r.get('reservas_creadas_hoy') or 0), int(r.get('servicios_14d') or 0)
+            return (
+                int(r.get('comensales_hoy') or 0),
+                int(r.get('actividad_reservas_hoy') or 0),
+                int(r.get('servicios_14d') or 0),
+            )
     except Exception:
         pass
     return 0,0,0
-
 
 def _render_subbanner_interno(rol):
     """Banner interno único y estandarizado para todos los perfiles."""
@@ -3281,7 +3325,7 @@ def _render_subbanner_interno(rol):
             f"<div style='font-size:22px;font-weight:800;margin:3px 0'>{hoy_txt}</div>"
             f"<div style='display:flex;gap:18px;flex-wrap:wrap'>"
             f"<span>Comensales activos hoy: <strong>{activos}</strong></span>"
-            f"<span>Reservas creadas hoy: <strong>{creadas}</strong></span>"
+            f"<span>Actividad de reservas hoy: <strong>{creadas}</strong></span>"
             f"<span>Servicios próximos 14 días: <strong>{prox}</strong></span></div>"
         )
     st.markdown(
@@ -3455,10 +3499,10 @@ def render_casino():
                 if min_hasta < min_desde:
                     st.error("La fecha hasta no puede ser anterior a la fecha desde.")
                 else:
-                    df_semana = get_minutas_rango(min_desde.isoformat(), min_hasta.isoformat())
+                    df_semana = _get_minutas_internas_rango(min_desde.isoformat(), min_hasta.isoformat())
                     fechas_vis = [min_desde + timedelta(days=i) for i in range((min_hasta-min_desde).days+1)]
                     _render_minuta_semanal(df_semana, fechas_visibles=fechas_vis, titulo_personalizado=f"📅 {min_desde.strftime('%d/%m/%Y')} → {min_hasta.strftime('%d/%m/%Y')}")
-                st.caption("Cocina visualiza la minuta en modo solo lectura. La gestión de minuta y recetas corresponde a perfiles autorizados.")
+                st.caption("Cocina visualiza la minuta interna en solo lectura, incluso durante revisión. Los comensales solo ven períodos PUBLICABLES.")
 
             if modulo_cocina == "▶️ Jornada de producción":
                 st.markdown("#### Jornada completa de producción")
@@ -4801,7 +4845,7 @@ def render_admin():
                         if p1 and p2 and p1.casefold()==p2.casefold():
                             conflictos.append({"Fecha":fconf,"Servicio":sconf,"Opciones":"Opción 1 / Opción 2","Plato":p1})
                     if conflictos:
-                        st.error("Conflicto de minuta: Opción 1 y Opción 2 repiten el mismo plato. Debe corregirse antes de enviar a Coordinación o publicar.")
+                        st.warning("Alerta preventiva de minuta: Opción 1 y Opción 2 repiten el mismo plato. La alerta queda visible para revisión, pero no bloquea el envío a Coordinación.")
                         st.dataframe(pd.DataFrame(conflictos),use_container_width=True,hide_index=True)
 
                     _asegurar_revision_coordinacion()
