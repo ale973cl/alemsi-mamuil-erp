@@ -1,0 +1,12 @@
+ALEMSI v2.1.3.40-RC2
+
+Esta es una versión acumulativa.
+Subir el contenido de 01_SUBIR_A_GITHUB a la raíz del repositorio, reemplazando archivos del mismo nombre.
+No cargar ZIP anteriores después de esta RC2.
+
+Durante la consolidación se protegieron por hash:
+- Reservas
+- Bodega perfil operativo
+- Inventario y Bodega Admin
+- Reportes Gerencia
+- common.py

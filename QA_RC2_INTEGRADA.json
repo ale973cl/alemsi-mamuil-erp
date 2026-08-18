@@ -1,0 +1,25 @@
+{
+  "version": "ALEMSI v2.1.3.40-RC2",
+  "compile_python": true,
+  "ast_parse": true,
+  "checks": {
+    "finanzas_sin_checkbox_critico": true,
+    "produccion_inicio_sin_checkbox": true,
+    "coordinacion_sin_checkbox_decision": true,
+    "coordinacion_visible": true,
+    "conflictos_bloquean_envio": true,
+    "publicada_requiere_revalidacion": true,
+    "bodega_protegida": true,
+    "reservas_protegidas": true,
+    "gerencia_protegida": true,
+    "common_protegido": true
+  },
+  "protected_hashes_equal": {
+    "common_py": true,
+    "reservas_render_comensal": true,
+    "bodega_perfil_casino": true,
+    "bodega_admin": true,
+    "gerencia_reportes": true
+  },
+  "nota": "QA estático aprobado. La ejecución real en Streamlit/Supabase/SMTP debe probarse luego del despliegue."
+}

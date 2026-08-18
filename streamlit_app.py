@@ -1,4 +1,4 @@
-# ALEMSI v2.1.3.40_CIERRE_ARQUITECTURA - candidata presentación Gerencia · Cocina + bloqueo pagos
+# ALEMSI v2.1.3.40-RC2 - candidata integrada · regresiones Finanzas/Producción/Coordinación corregidas
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -2673,7 +2673,7 @@ def _invalidar_autorizacion_minuta(fecha_iso, usuario, motivo):
                 END
             WHERE COALESCE(activo,1)=1
               AND fecha_desde<=%s AND fecha_hasta>=%s
-              AND estado IN ('EN_REVISION','AUTORIZADA')
+              AND estado IN ('EN_REVISION','AUTORIZADA','PUBLICADA')
             """,
             (motivo, motivo, str(fecha_iso), str(fecha_iso))
         )
@@ -2926,16 +2926,11 @@ def render_coordinacion():
                     key=f"coord_observacion_{flujo_id}",
                     placeholder="Obligatoria si observas la minuta. Indica claramente qué debe revisar Administración Casino."
                 )
-                confirmar = st.checkbox(
-                    "Confirmo que revisé la propuesta completa del período.",
-                    key=f"coord_confirmar_{flujo_id}"
-                )
+                st.caption("La decisión queda registrada con usuario, fecha, versión y trazabilidad al presionar el botón.")
 
                 if st.button(
-                    "Guardar decisión de Coordinación",
-                    type="primary",
-                    use_container_width=True,
-                    disabled=not confirmar,
+                    "✅ AUTORIZAR MINUTA" if decision=="AUTORIZAR" else "🟠 ENVIAR OBSERVACIÓN",
+                    type="primary", use_container_width=True,
                     key=f"coord_guardar_decision_{flujo_id}"
                 ):
                     if decision=="OBSERVAR" and not observacion.strip():
@@ -3365,19 +3360,27 @@ def render_casino():
                         )
 
                 if estado == "Pendiente":
-                    confirmar = st.checkbox(
-                        f"Confirmo iniciar la jornada completa del {fecha_j.strftime('%d/%m/%Y')}",
-                        key=f"conf_ini_j_{fecha_iso}"
-                    )
-                    iniciar_jornada = st.button(
-                        "▶️ INICIAR JORNADA",
-                        type="primary",
-                        use_container_width=True,
-                        key=f"iniciar_jornada_{fecha_iso}"
-                    )
-                    if iniciar_jornada and not confirmar:
-                        st.warning("Marca la casilla de confirmación antes de iniciar la jornada.")
-                    if iniciar_jornada and confirmar:
+                    clave_confirmacion_inicio = f"_confirmar_inicio_jornada_{fecha_iso}"
+                    iniciar_jornada = False
+                    if not st.session_state.get(clave_confirmacion_inicio, False):
+                        if st.button("▶️ INICIAR JORNADA", type="primary", use_container_width=True, key=f"preparar_inicio_jornada_{fecha_iso}"):
+                            st.session_state[clave_confirmacion_inicio] = True
+                            st.rerun()
+                    else:
+                        st.warning(
+                            "Vas a iniciar la jornada completa. Se congelará la producción y, cuando existan recetas aprobadas, "
+                            "se aplicará el descuento teórico de Bodega una sola vez."
+                        )
+                        ci1, ci2 = st.columns(2)
+                        with ci1:
+                            iniciar_jornada = st.button("✅ Sí, iniciar jornada", type="primary", use_container_width=True, key=f"confirmar_inicio_jornada_{fecha_iso}")
+                        with ci2:
+                            cancelar_inicio = st.button("Cancelar", use_container_width=True, key=f"cancelar_inicio_jornada_{fecha_iso}")
+                        if cancelar_inicio:
+                            st.session_state.pop(clave_confirmacion_inicio, None)
+                            st.rerun()
+                    if iniciar_jornada:
+                        st.session_state.pop(clave_confirmacion_inicio, None)
                         sin_receta = []
                         sin_minuta = []
                         faltantes_stock = []
@@ -3834,28 +3837,20 @@ def render_casino():
                         key=f"fin_obs_bandeja_{ref_val}",
                     )
                     requiere_obs_val = nuevo_val == "RECHAZADO"
-                    decision_confirmada = st.checkbox(
-                        "Confirmo esta decisión financiera",
-                        key=f"fin_confirmar_decision_{ref_val}",
+                    st.caption(
+                        "La decisión se aplicará únicamente al presionar el botón. "
+                        "Para rechazar, la observación es obligatoria."
                     )
-                    faltante_fin = []
-                    if not archivo_disponible:
-                        faltante_fin.append("comprobante disponible")
-                    if not decision_confirmada:
-                        faltante_fin.append("confirmar la decisión")
-                    if requiere_obs_val and not obs_val.strip():
-                        faltante_fin.append("motivo del rechazo")
-                    if faltante_fin:
-                        st.caption("Para continuar falta: " + ", ".join(faltante_fin) + ".")
                     confirmar_revision = st.button(
-                        "Confirmar revisión",
-                        type="primary",
-                        use_container_width=True,
-                        disabled=bool(faltante_fin),
+                        "✅ APROBAR COMPROBANTE" if nuevo_val == "APROBADO" else "❌ RECHAZAR COMPROBANTE",
+                        type="primary", use_container_width=True,
                         key=f"fin_confirmar_revision_{ref_val}",
                     )
 
                     if confirmar_revision:
+                        if not archivo_disponible:
+                            st.error("El comprobante no está disponible para validar. Revisa su almacenamiento antes de continuar.")
+                            return
                         if requiere_obs_val and not obs_val.strip():
                             st.error("Debes ingresar el motivo del rechazo.")
                             return
@@ -4565,13 +4560,6 @@ def render_admin():
         if modulo_admin == "🍽️ Minutas":
             flash_minuta = st.session_state.pop("_flash_minuta", None)
             if flash_minuta: st.success(flash_minuta)
-            try:
-                obs_rec= get_conn().query("SELECT plato,version_receta,accion,observacion,usuario,fecha_accion,estado FROM receta_revision_coordinacion WHERE accion='OBSERVAR' ORDER BY fecha_accion DESC,id DESC",ttl=0)
-                if not obs_rec.empty:
-                    with st.expander(f"🤝 Coordinación · observaciones de recetas · {len(obs_rec)}",expanded=False):
-                        st.dataframe(_tabla_visible(obs_rec,{"plato":"Plato","version_receta":"Versión","accion":"Acción","observacion":"Observación","usuario":"Usuario","fecha_accion":"Fecha / hora","estado":"Estado"},["fecha_accion"]),use_container_width=True,hide_index=True)
-            except Exception:
-                pass
             st.markdown("#### 🍽️ Calendario de minutas por período")
             st.caption("El usuario define libremente el rango que desea visualizar.")
             conn=get_conn()
@@ -4597,146 +4585,150 @@ def render_admin():
                         if p1 and p2 and p1.casefold()==p2.casefold():
                             conflictos.append({"Fecha":fconf,"Servicio":sconf,"Opciones":"Opción 1 / Opción 2","Plato":p1})
                     if conflictos:
-                        st.error("Conflicto de minuta: Opción 1 y Opción 2 repiten el mismo plato. Debe corregirse antes de publicar.")
+                        st.error("Conflicto de minuta: Opción 1 y Opción 2 repiten el mismo plato. Debe corregirse antes de enviar a Coordinación o publicar.")
                         st.dataframe(pd.DataFrame(conflictos),use_container_width=True,hide_index=True)
-                    else:
-                        _asegurar_revision_coordinacion()
 
-                        st.markdown("### 🤝 Validación por Coordinación")
-                        st.caption(
-                            "Una vez cargada la minuta del período, envíala a Coordinación para revisión. "
-                            "Coordinación puede Autorizar u Observar. Solo una minuta autorizada puede publicarse."
+                    _asegurar_revision_coordinacion()
+
+                    st.markdown("### 🤝 Validación por Coordinación")
+                    st.caption(
+                        "Una vez cargada la minuta del período, envíala a Coordinación para revisión. "
+                        "Coordinación puede Autorizar u Observar. Solo una minuta autorizada puede publicarse."
+                    )
+                    _render_estado_coordinacion_admin(ini, fin)
+
+                    actual_coord = _flujo_minuta_actual(ini.isoformat(), fin.isoformat())
+                    estado_coord = str(actual_coord.iloc[0].get("estado") or "") if not actual_coord.empty else ""
+
+                    estados_min = set(df_min["estado"].fillna("BORRADOR").astype(str).str.upper().tolist())
+                    tiene_minuta = not df_min.empty
+
+                    ab1,ab2,ab3=st.columns(3)
+
+                    with ab1:
+                        if st.button(
+                            "🔎 Revisar / auditar minuta",
+                            use_container_width=True,
+                            key="auditar_minuta_periodo",
+                            disabled=bool(conflictos)
+                        ):
+                            with conn.session as ses:
+                                execute_sql(
+                                    ses,
+                                    "UPDATE minutas SET estado='AUDITADA' "
+                                    "WHERE activo=1 AND fecha>=%s AND fecha<=%s "
+                                    "AND COALESCE(estado,'BORRADOR') IN ('BORRADOR','PUBLICABLE')",
+                                    (ini.isoformat(),fin.isoformat())
+                                )
+                                ses.commit()
+                            registrar_auditoria(
+                                st.session_state.usuario.get('username'),
+                                'AUDITAR_MINUTA','minutas',
+                                f"{ini.isoformat()}..{fin.isoformat()}",
+                                'BORRADOR/PUBLICABLE','AUDITADA',
+                                'Revisión previa al envío a Coordinación'
+                            )
+                            st.session_state["_flash_minuta"]="✅ Minuta revisada. Ya puedes enviarla a Coordinación."
+                            st.rerun()
+
+                    with ab2:
+                        etiqueta_envio = (
+                            "↻ Reenviar a Coordinación"
+                            if estado_coord in ["OBSERVADA","REQUIERE_REVALIDACION"]
+                            else "📤 Enviar a Coordinación"
                         )
-                        _render_estado_coordinacion_admin(ini, fin)
-
-                        actual_coord = _flujo_minuta_actual(ini.isoformat(), fin.isoformat())
-                        estado_coord = str(actual_coord.iloc[0].get("estado") or "") if not actual_coord.empty else ""
-
-                        estados_min = set(df_min["estado"].fillna("BORRADOR").astype(str).str.upper().tolist())
-                        tiene_minuta = not df_min.empty
-
-                        ab1,ab2,ab3=st.columns(3)
-
-                        with ab1:
-                            if st.button(
-                                "🔎 Revisar / auditar minuta",
-                                use_container_width=True,
-                                key="auditar_minuta_periodo"
-                            ):
-                                with conn.session as ses:
-                                    execute_sql(
-                                        ses,
-                                        "UPDATE minutas SET estado='AUDITADA' "
-                                        "WHERE activo=1 AND fecha>=%s AND fecha<=%s "
-                                        "AND COALESCE(estado,'BORRADOR') IN ('BORRADOR','PUBLICABLE')",
-                                        (ini.isoformat(),fin.isoformat())
-                                    )
-                                    ses.commit()
-                                registrar_auditoria(
-                                    st.session_state.usuario.get('username'),
-                                    'AUDITAR_MINUTA','minutas',
-                                    f"{ini.isoformat()}..{fin.isoformat()}",
-                                    'BORRADOR/PUBLICABLE','AUDITADA',
-                                    'Revisión previa al envío a Coordinación'
+                        envio_bloqueado = (
+                            not tiene_minuta
+                            or bool(conflictos)
+                            or estado_coord in ["EN_REVISION","AUTORIZADA","PUBLICADA"]
+                        )
+                        if st.button(
+                            etiqueta_envio,
+                            use_container_width=True,
+                            key="enviar_coord_minuta_periodo",
+                            disabled=envio_bloqueado,
+                            type="primary"
+                        ):
+                            # Al enviar, cualquier fila BORRADOR/PUBLICABLE del período queda
+                            # marcada AUDITADA, sin modificar platos ni contenido.
+                            with conn.session as ses:
+                                execute_sql(
+                                    ses,
+                                    "UPDATE minutas SET estado='AUDITADA' "
+                                    "WHERE activo=1 AND fecha>=%s AND fecha<=%s "
+                                    "AND COALESCE(estado,'BORRADOR') IN ('BORRADOR','PUBLICABLE')",
+                                    (ini.isoformat(),fin.isoformat())
                                 )
-                                st.session_state["_flash_minuta"]="✅ Minuta revisada. Ya puedes enviarla a Coordinación."
-                                st.rerun()
-
-                        with ab2:
-                            etiqueta_envio = (
-                                "↻ Reenviar a Coordinación"
-                                if estado_coord in ["OBSERVADA","REQUIERE_REVALIDACION"]
-                                else "📤 Enviar a Coordinación"
+                                ses.commit()
+                            version_coord = _enviar_minuta_coordinacion(
+                                ini.isoformat(),fin.isoformat(),
+                                st.session_state.usuario.get('username')
                             )
-                            envio_bloqueado = (
-                                not tiene_minuta
-                                or estado_coord in ["EN_REVISION","AUTORIZADA","PUBLICADA"]
+                            st.session_state["_flash_minuta"] = (
+                                f"✅ Minuta enviada a Coordinación para revisión · versión {version_coord}."
                             )
-                            if st.button(
-                                etiqueta_envio,
-                                use_container_width=True,
-                                key="enviar_coord_minuta_periodo",
-                                disabled=envio_bloqueado,
-                                type="primary"
-                            ):
-                                # Al enviar, cualquier fila BORRADOR/PUBLICABLE del período queda
-                                # marcada AUDITADA, sin modificar platos ni contenido.
-                                with conn.session as ses:
-                                    execute_sql(
-                                        ses,
-                                        "UPDATE minutas SET estado='AUDITADA' "
-                                        "WHERE activo=1 AND fecha>=%s AND fecha<=%s "
-                                        "AND COALESCE(estado,'BORRADOR') IN ('BORRADOR','PUBLICABLE')",
-                                        (ini.isoformat(),fin.isoformat())
-                                    )
-                                    ses.commit()
-                                version_coord = _enviar_minuta_coordinacion(
-                                    ini.isoformat(),fin.isoformat(),
-                                    st.session_state.usuario.get('username')
-                                )
-                                st.session_state["_flash_minuta"] = (
-                                    f"✅ Minuta enviada a Coordinación para revisión · versión {version_coord}."
-                                )
-                                st.rerun()
+                            st.rerun()
 
-                        with ab3:
-                            publicar_habilitado = estado_coord=="AUTORIZADA"
-                            if st.button(
-                                "✅ Publicar período",
-                                use_container_width=True,
-                                key="publicar_minuta_periodo",
-                                disabled=not publicar_habilitado
-                            ):
-                                with conn.session as ses:
-                                    execute_sql(
-                                        ses,
-                                        "UPDATE minutas SET estado='PUBLICABLE' "
-                                        "WHERE activo=1 AND fecha>=%s AND fecha<=%s "
-                                        "AND estado IN ('AUDITADA','BORRADOR')",
-                                        (ini.isoformat(),fin.isoformat())
-                                    )
-                                    execute_sql(
-                                        ses,
-                                        """
-                                        UPDATE minuta_flujo_coordinacion
-                                        SET estado='PUBLICADA'
-                                        WHERE fecha_desde=%s AND fecha_hasta=%s
-                                          AND COALESCE(activo,1)=1
-                                          AND estado='AUTORIZADA'
-                                        """,
-                                        (ini.isoformat(),fin.isoformat())
-                                    )
-                                    ses.commit()
-                                registrar_auditoria(
-                                    st.session_state.usuario.get('username'),
-                                    'PUBLICAR_MINUTA','minutas',
-                                    f"{ini.isoformat()}..{fin.isoformat()}",
-                                    'AUTORIZADA','PUBLICABLE',
-                                    'Publicación posterior a autorización de Coordinación'
+                    with ab3:
+                        publicar_habilitado = estado_coord=="AUTORIZADA" and not bool(conflictos)
+                        if st.button(
+                            "✅ Publicar período",
+                            use_container_width=True,
+                            key="publicar_minuta_periodo",
+                            disabled=not publicar_habilitado
+                        ):
+                            with conn.session as ses:
+                                execute_sql(
+                                    ses,
+                                    "UPDATE minutas SET estado='PUBLICABLE' "
+                                    "WHERE activo=1 AND fecha>=%s AND fecha<=%s "
+                                    "AND estado IN ('AUDITADA','BORRADOR')",
+                                    (ini.isoformat(),fin.isoformat())
                                 )
-                                get_minutas_rango.clear()
-                                asunto_pub = "[ALEMSI] Minuta autorizada publicada"
-                                html_pub = f"""
-                                <div style='font-family:Arial,sans-serif;max-width:680px;margin:auto;border:1px solid #d7e2dc;border-radius:14px;padding:22px'>
-                                  <h2 style='color:#086B37'>Minuta publicada</h2>
-                                  <p>La minuta previamente autorizada por Coordinación fue publicada por Administración Casino.</p>
-                                  <p><b>Período:</b> {ini.strftime('%d/%m/%Y')} → {fin.strftime('%d/%m/%Y')}</p>
-                                </div>
-                                """
-                                _notificar_flujo_coordinacion('coordinacion', asunto_pub, html_pub, 'minuta_flujo_coordinacion', f'{ini.isoformat()}..{fin.isoformat()}', st.session_state.usuario.get('username'), 'Confirmación de publicación')
-                                st.session_state["_flash_minuta"]="✅ Minuta autorizada por Coordinación y publicada para reservas."
-                                st.rerun()
+                                execute_sql(
+                                    ses,
+                                    """
+                                    UPDATE minuta_flujo_coordinacion
+                                    SET estado='PUBLICADA'
+                                    WHERE fecha_desde=%s AND fecha_hasta=%s
+                                      AND COALESCE(activo,1)=1
+                                      AND estado='AUTORIZADA'
+                                    """,
+                                    (ini.isoformat(),fin.isoformat())
+                                )
+                                ses.commit()
+                            registrar_auditoria(
+                                st.session_state.usuario.get('username'),
+                                'PUBLICAR_MINUTA','minutas',
+                                f"{ini.isoformat()}..{fin.isoformat()}",
+                                'AUTORIZADA','PUBLICABLE',
+                                'Publicación posterior a autorización de Coordinación'
+                            )
+                            get_minutas_rango.clear()
+                            asunto_pub = "[ALEMSI] Minuta autorizada publicada"
+                            html_pub = f"""
+                            <div style='font-family:Arial,sans-serif;max-width:680px;margin:auto;border:1px solid #d7e2dc;border-radius:14px;padding:22px'>
+                              <h2 style='color:#086B37'>Minuta publicada</h2>
+                              <p>La minuta previamente autorizada por Coordinación fue publicada por Administración Casino.</p>
+                              <p><b>Período:</b> {ini.strftime('%d/%m/%Y')} → {fin.strftime('%d/%m/%Y')}</p>
+                            </div>
+                            """
+                            _notificar_flujo_coordinacion('coordinacion', asunto_pub, html_pub, 'minuta_flujo_coordinacion', f'{ini.isoformat()}..{fin.isoformat()}', st.session_state.usuario.get('username'), 'Confirmación de publicación')
+                            st.session_state["_flash_minuta"]="✅ Minuta autorizada por Coordinación y publicada para reservas."
+                            st.rerun()
 
-                        if not tiene_minuta:
-                            st.info("Carga primero una minuta dentro del período seleccionado.")
-                        elif estado_coord=="EN_REVISION":
-                            st.info("La minuta está en revisión por Coordinación. Espera su decisión antes de publicar.")
-                        elif estado_coord=="OBSERVADA":
-                            st.warning("Coordinación observó la minuta. Corrige lo solicitado y vuelve a enviarla.")
-                        elif estado_coord=="REQUIERE_REVALIDACION":
-                            st.warning("La minuta cambió después del envío/autorización. Debe reenviarse a Coordinación.")
-                        elif estado_coord=="AUTORIZADA":
-                            st.success("Coordinación autorizó completamente esta propuesta. Ya puedes publicarla.")
+                    if conflictos:
+                        st.warning("La validación por Coordinación está visible, pero el envío queda bloqueado hasta corregir los conflictos indicados arriba.")
+                    elif not tiene_minuta:
+                        st.info("Carga primero una minuta dentro del período seleccionado.")
+                    elif estado_coord=="EN_REVISION":
+                        st.info("La minuta está en revisión por Coordinación. Espera su decisión antes de publicar.")
+                    elif estado_coord=="OBSERVADA":
+                        st.warning("Coordinación observó la minuta. Corrige lo solicitado y vuelve a enviarla.")
+                    elif estado_coord=="REQUIERE_REVALIDACION":
+                        st.warning("La minuta cambió después del envío/autorización. Debe reenviarse a Coordinación.")
+                    elif estado_coord=="AUTORIZADA":
+                        st.success("Coordinación autorizó completamente esta propuesta. Ya puedes publicarla.")
             _sincronizar_maestro_platos()
             with st.expander("📚 Maestro de Platos · catálogo reutilizable", expanded=False):
                 st.caption("Fuente única para crear minutas. Los platos históricos de Minutas se incorporan al maestro sin modificar costos ni recetas.")
