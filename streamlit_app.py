@@ -1,4 +1,4 @@
-# ALEMSI v2.1.3.40-RC2 - candidata integrada · regresiones Finanzas/Producción/Coordinación corregidas
+# ALEMSI v2.1.3.44-RC7 · Minutas restauradas / estados separados - estabilización de confirmaciones, permisos y validación de minutas
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -609,6 +609,7 @@ if token_q:
                 "Comprobante recibido. Google Drive no estaba disponible/configurado, "
                 "por lo que se guardó temporalmente en PostgreSQL para no perder la carga."
             )
+        # FIN-REFRESH-RC6: mostrar inmediatamente el estado recién guardado.
         st.rerun()
     if comprobante_cargado:
         _render_encuestas_portal(conn, token_q, ref, str(df_token.iloc[0]['rut']), str(df_token.iloc[0]['institucion']))
@@ -710,22 +711,23 @@ def permiso_habilitado(username, permiso, default=True):
     cache[clave] = valor
     return valor
 
-st.markdown('''
-<div class="main-header">
-  <div class="alemsi-topbar">
-    <div class="alemsi-brand">
-      <div class="alemsi-mark"><span></span><span></span><span></span><span></span></div>
-      <div class="alemsi-brandcopy"><strong>ALEMSI</strong><small>Servicios de Higiene y Desinfección</small></div>
+if not st.session_state.usuario:
+    st.markdown('''
+    <div class="main-header">
+      <div class="alemsi-topbar">
+        <div class="alemsi-brand">
+          <div class="alemsi-mark"><span></span><span></span><span></span><span></span></div>
+          <div class="alemsi-brandcopy"><strong>ALEMSI</strong><small>Servicios de Higiene y Desinfección</small></div>
+        </div>
+        <div class="alemsi-secure">✓ Sistema de reserva segura</div>
+      </div>
+      <div class="alemsi-hero">
+        <div class="alemsi-place">Complejo Fronterizo · Araucanía</div>
+        <h1>Reserva de Alimentación<br><em>Mamuil Malal</em></h1>
+        <p>Reserva tus servicios de alimentación de forma simple y segura.</p>
+      </div>
     </div>
-    <div class="alemsi-secure">✓ Sistema de reserva segura</div>
-  </div>
-  <div class="alemsi-hero">
-    <div class="alemsi-place">Complejo Fronterizo · Araucanía</div>
-    <h1>Reserva de Alimentación<br><em>Mamuil Malal</em></h1>
-    <p>Selecciona tus fechas y servicios de alimentación. La operación de reservas mantiene intactas sus reglas, comprobantes y notificaciones.</p>
-  </div>
-</div>
-''', unsafe_allow_html=True)
+    ''', unsafe_allow_html=True)
 
 if st.session_state.usuario or st.session_state.rut_actual:
     if st.session_state.usuario:
@@ -1021,8 +1023,8 @@ def _render_dashboard_integral_alemsi(conn=None, *, key_prefix="dash"):
 
     st.markdown("#### Resumen general")
     c1,c2,c3,c4,c5 = st.columns(5)
-    c1.metric("Reservas totales", int(reservas["referencia_reserva"].nunique()))
-    c2.metric("Próximas 14 días", int(proximas["referencia_reserva"].nunique()))
+    c1.metric("Reservas comerciales activas", int(reservas["referencia_reserva"].nunique()))
+    c2.metric("Reservas comerciales · próximos 14 días", int(proximas["referencia_reserva"].nunique()))
     c3.metric("Pagadas", int(es_pagado.sum()))
     c4.metric("Por pagar", int((~es_pagado).sum()))
     c5.metric("Valorización", formato_clp(reservas["monto"].sum()))
@@ -1054,7 +1056,7 @@ def _render_dashboard_integral_alemsi(conn=None, *, key_prefix="dash"):
         sv = servicios.copy()
         sv["fecha_dt"] = pd.to_datetime(sv["fecha"], errors="coerce").dt.date
 
-        st.markdown("#### Próximas reservas · 14 días")
+        st.markdown("#### Servicios de reservas comerciales · próximos 14 días")
         prox_sv = sv[
             sv["fecha_dt"].notna() & (sv["fecha_dt"] >= hoy) & (sv["fecha_dt"] <= hasta_14)
         ].copy()
@@ -1410,7 +1412,11 @@ def _render_minuta_semanal(df_minuta, fecha_base=None, titulo=True, fechas_visib
 
 
 def _deuda_vencida_bloqueante(rut):
-    """RES-PAGO-40: bloquea nuevas reservas comerciales solo por servicios ya vencidos e impagos."""
+    """RES-PAGO-RC5: bloquea nuevas reservas si existe una reserva comercial activa con pago aún no validado.
+
+    Pago y reserva son estados independientes: una reserva futura pagada continúa ACTIVA
+    para Cocina/Producción hasta consumo, cancelación o cierre correspondiente.
+    """
     try:
         conn = get_conn()
         return conn.query(
@@ -1424,7 +1430,6 @@ def _deuda_vencida_bloqueante(rut):
             FROM solicitudes
             WHERE rut=:rut
               AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
-              AND fecha < :hoy
               AND COALESCE(precio_aplicado,precio,0) > 0
               AND COALESCE(tipo_registro,'RESERVA_COMERCIAL')='RESERVA_COMERCIAL'
               AND LOWER(TRIM(COALESCE(estado_pago,'Pendiente'))) NOT IN (
@@ -1433,12 +1438,11 @@ def _deuda_vencida_bloqueante(rut):
             GROUP BY referencia_reserva
             ORDER BY MIN(fecha), referencia_reserva
             """,
-            params={"rut": normalizar_rut_db(rut), "hoy": date.today().isoformat()},
+            params={"rut": normalizar_rut_db(rut)},
             ttl=0,
         )
     except Exception:
         return pd.DataFrame()
-
 
 def _requerimiento_receta(cantidad_base, porciones, merma_pct=0, margen_pct=0):
     """Cantidad bruta operacional: base por ración -> merma -> margen de producción."""
@@ -1848,7 +1852,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                 """, unsafe_allow_html=True)
                 st.caption(
                     "Puedes elegir un día, fechas consecutivas o fechas intercaladas. "
-                    "Los días pasados y los días sin minuta no están disponibles."
+                    "La reserva exige una anticipación mínima de 48 horas. Hoy, mañana y los días sin minuta no están disponibles."
                 )
 
                 if "fechas_calendario" not in st.session_state:
@@ -1870,7 +1874,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                         with columna:
                             st.markdown('<span class="alemsi-cal-cell"></span>', unsafe_allow_html=True)
                             pertenece_mes = dia.month == hoy.month
-                            disponible = pertenece_mes and dia >= hoy and (
+                            disponible = pertenece_mes and dia >= (hoy + timedelta(days=2)) and (
                                 not fechas_con_minuta or dia.isoformat() in fechas_con_minuta
                             )
                             if not pertenece_mes:
@@ -1888,7 +1892,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                     args=(fecha_iso,),
                                 )
                             else:
-                                motivo = "Pasado" if dia < hoy else "Sin minuta"
+                                motivo = "Fuera de plazo 48 h" if dia < (hoy + timedelta(days=2)) else "Sin minuta"
                                 st.markdown(
                                     f"<div class='alemsi-cal-disabled'>"
                                     f"<b>{dia.day}</b><br><small>{motivo}</small></div>",
@@ -1968,6 +1972,9 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                             tipos_permitidos = {"OPCION 1", "OPCIÓN 1", "HIPOCALORICO", "HIPOCALÓRICO", "TIPO R"} if tipo_alemsi == "paso" else {"OPCION 1", "OPCIÓN 1", "OPCION 2", "OPCIÓN 2", "HIPOCALORICO", "HIPOCALÓRICO", "TIPO R"}
                             disponibles = 0
                             for servicio in servicios_internos:
+                                if not reserva_modificable(f_iso, servicio):
+                                    st.caption(f"{servicio}: fuera del plazo mínimo de 48 horas.")
+                                    continue
                                 grupo = filas_fecha[filas_fecha["servicio"].astype(str) == servicio].copy() if not filas_fecha.empty else pd.DataFrame()
                                 if grupo.empty:
                                     continue
@@ -2016,6 +2023,12 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                 st.warning("No existe minuta configurada para esta fecha.")
                             servicios_visibles = [x for x in orden_servicios if opciones_por_servicio.get(x)]
                             servicios_visibles += sorted([x for x in opciones_por_servicio if x not in servicios_visibles])
+                            servicios_fuera_48h = [s for s in servicios_visibles if not reserva_modificable(f_iso, s)]
+                            servicios_visibles = [s for s in servicios_visibles if reserva_modificable(f_iso, s)]
+                            if servicios_fuera_48h:
+                                st.caption(
+                                    "Fuera del plazo mínimo de 48 h: " + ", ".join(servicios_fuera_48h) + "."
+                                )
                             for servicio in servicios_visibles:
                                 registros = opciones_por_servicio.get(servicio, [])
                                 icono = iconos_servicio.get(servicio, "🍴")
@@ -2149,6 +2162,20 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                     if confirmar:
                         if not es_alemsi and not aceptar:
                             st.error("Debes confirmar que revisaste la reserva.")
+                            st.stop()
+
+                        # RES-48H-RC6: protección backend por fecha + hora real del servicio.
+                        fuera_plazo_48h = []
+                        for f_iso, _dnom, servicio, *_resto in detalle:
+                            if not reserva_modificable(f_iso, servicio):
+                                fuera_plazo_48h.append(
+                                    f"{servicio} · {date.fromisoformat(f_iso).strftime('%d/%m/%Y')}"
+                                )
+                        if fuera_plazo_48h:
+                            st.error(
+                                "La reserva exige al menos 48 horas de anticipación. "
+                                "Fuera de plazo: " + ", ".join(sorted(set(fuera_plazo_48h))) + "."
+                            )
                             st.stop()
 
                         conn = get_conn()
@@ -2481,6 +2508,144 @@ def _render_platos_tres_columnas(df, plato_col="plato", valor_col="porciones"):
             st.progress(min(max(float(fila["porcentaje"]) / 100.0, 0.0), 1.0))
 
 
+
+def _asegurar_documentos_minuta_y_gerencia():
+    conn=get_conn()
+    with conn.session as ses:
+        execute_sql(ses, """CREATE TABLE IF NOT EXISTS minuta_documentos (
+            id SERIAL PRIMARY KEY,
+            nombre_archivo TEXT NOT NULL,
+            mime_type TEXT DEFAULT 'application/pdf',
+            contenido BYTEA,
+            sha256 TEXT,
+            fecha_desde TEXT,
+            fecha_hasta TEXT,
+            cargado_por TEXT,
+            cargado_at TEXT,
+            estado TEXT DEFAULT 'FUENTE',
+            observacion TEXT
+        )""")
+        execute_sql(ses, """CREATE TABLE IF NOT EXISTS minuta_observaciones_gerencia (
+            id SERIAL PRIMARY KEY,
+            fecha_desde TEXT NOT NULL,
+            fecha_hasta TEXT NOT NULL,
+            observacion TEXT NOT NULL,
+            usuario TEXT,
+            fecha_accion TEXT,
+            estado TEXT DEFAULT 'ABIERTA'
+        )""")
+        ses.commit()
+
+def _extraer_texto_pdf_minuta(pdf_bytes):
+    try:
+        from pypdf import PdfReader
+        reader=PdfReader(BytesIO(pdf_bytes))
+        return "\n".join((p.extract_text() or "") for p in reader.pages)
+    except Exception:
+        return ""
+
+def _normalizar_servicio_minuta(txt):
+    t=str(txt or '').strip().upper()
+    for s in ['DESAYUNO','ALMUERZO','ONCE','CENA']:
+        if s in t:
+            return s.title()
+    return ''
+
+def _normalizar_opcion_minuta(txt):
+    t=' '.join(str(txt or '').upper().replace('Ó','O').split())
+    if 'HIPOCAL' in t:
+        return 'HIPOCALORICO'
+    if 'TIPO R' in t:
+        return 'TIPO R'
+    m=re.search(r'OPCION\s*([123])',t)
+    return f'OPCION {m.group(1)}' if m else ''
+
+def _preparsear_minuta_pdf(texto):
+    filas=[]
+    fecha_actual=None
+    servicio_actual=''
+    patron_fecha=re.compile(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b')
+    for raw in (texto or '').splitlines():
+        linea=' '.join(raw.split())
+        if not linea:
+            continue
+        mf=patron_fecha.search(linea)
+        if mf:
+            try:
+                fecha_actual=pd.to_datetime(mf.group(1),dayfirst=True).date().isoformat()
+            except Exception:
+                pass
+        serv=_normalizar_servicio_minuta(linea)
+        if serv:
+            servicio_actual=serv
+        op=_normalizar_opcion_minuta(linea)
+        if op and fecha_actual:
+            plato=patron_fecha.sub('',linea)
+            for token in ['DESAYUNO','Desayuno','ALMUERZO','Almuerzo','ONCE','Once','CENA','Cena',
+                          'OPCIÓN 1','OPCION 1','OPCIÓN 2','OPCION 2','OPCIÓN 3','OPCION 3',
+                          'HIPOCALÓRICO','HIPOCALORICO','TIPO R']:
+                plato=plato.replace(token,' ')
+            plato=' '.join(plato.replace('|',' ').replace(':',' ').split()).strip(' -')
+            if plato and len(plato)>2:
+                filas.append({'fecha':fecha_actual,'servicio':servicio_actual,'tipo_opcion':op,'plato':plato})
+    return pd.DataFrame(filas).drop_duplicates() if filas else pd.DataFrame(columns=['fecha','servicio','tipo_opcion','plato'])
+
+def _guardar_documento_minuta(nombre,mime,contenido,fecha_desde,fecha_hasta,usuario,observacion=''):
+    _asegurar_documentos_minuta_y_gerencia()
+    import hashlib as _hashlib
+    digest=_hashlib.sha256(contenido).hexdigest()
+    conn=get_conn()
+    ahora=datetime.now().isoformat()
+    with conn.session as ses:
+        row=execute_sql(ses,"SELECT id FROM minuta_documentos WHERE sha256=%s ORDER BY id DESC LIMIT 1",(digest,)).first()
+        if row:
+            doc_id=int(row[0])
+            execute_sql(ses,"UPDATE minuta_documentos SET fecha_desde=%s,fecha_hasta=%s,observacion=%s WHERE id=%s",
+                        (fecha_desde,fecha_hasta,observacion,doc_id))
+        else:
+            doc_id=int(execute_sql(
+                ses,
+                "INSERT INTO minuta_documentos (nombre_archivo,mime_type,contenido,sha256,fecha_desde,fecha_hasta,cargado_por,cargado_at,estado,observacion) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'FUENTE',%s) RETURNING id",
+                (nombre,mime,contenido,digest,fecha_desde,fecha_hasta,usuario,ahora,observacion)
+            ).first()[0])
+        ses.commit()
+    registrar_auditoria(usuario,'CARGAR_PDF_MINUTA','minuta_documentos',str(doc_id),'','FUENTE',nombre)
+    return doc_id
+
+def _render_documento_fuente_minuta(fecha_desde,fecha_hasta,key_prefix):
+    _asegurar_documentos_minuta_y_gerencia()
+    df=get_conn().query(
+        """SELECT id,nombre_archivo,mime_type,contenido,cargado_por,cargado_at
+           FROM minuta_documentos
+           WHERE COALESCE(fecha_desde,'')<=:f AND COALESCE(fecha_hasta,'')>=:i
+           ORDER BY id DESC LIMIT 1""",
+        params={'i':str(fecha_desde),'f':str(fecha_hasta)},ttl=0
+    )
+    if df.empty:
+        return
+    r=df.iloc[0]
+    st.caption(f"Documento fuente: {r.get('nombre_archivo')} · cargado por {r.get('cargado_por') or '—'}")
+    if r.get('contenido') is not None:
+        st.download_button(
+            '📄 Abrir / descargar PDF original',
+            bytes(r.get('contenido')),
+            file_name=str(r.get('nombre_archivo') or 'minuta.pdf'),
+            mime=str(r.get('mime_type') or 'application/pdf'),
+            use_container_width=True,
+            key=f'{key_prefix}_{int(r.get("id"))}'
+        )
+
+def _observaciones_gerencia_rango(fecha_desde,fecha_hasta):
+    _asegurar_documentos_minuta_y_gerencia()
+    return get_conn().query(
+        """SELECT id,observacion,usuario,fecha_accion,estado
+           FROM minuta_observaciones_gerencia
+           WHERE fecha_desde=:i AND fecha_hasta=:f
+           ORDER BY id DESC""",
+        params={'i':str(fecha_desde),'f':str(fecha_hasta)},ttl=0
+    )
+
 def _asegurar_revision_coordinacion():
     """Estructura incremental: no altera la minuta oficial; guarda solo revisión/propuestas."""
     conn = get_conn()
@@ -2608,6 +2773,27 @@ def _cargar_demanda_produccion_fecha(fecha_iso):
         """, params={"fecha":fecha_iso}, ttl=0
     )
     return df_prod, df_alemsi
+
+
+def _get_minutas_internas_rango(fecha_inicio, fecha_fin):
+    """Vista interna de minuta: BORRADOR/AUDITADA/AUTORIZADA/PUBLICABLE sin exponer borradores al comensal."""
+    try:
+        return get_conn().query(
+            """
+            SELECT id,fecha,dia_semana,servicio,tipo_opcion,plato,activo,
+                   COALESCE(estado,'BORRADOR') AS estado
+            FROM minutas
+            WHERE COALESCE(activo,1)=1
+              AND fecha>=:i AND fecha<=:f
+            ORDER BY fecha,
+                     CASE servicio WHEN 'Desayuno' THEN 1 WHEN 'Almuerzo' THEN 2
+                                   WHEN 'Once' THEN 3 WHEN 'Cena' THEN 4 ELSE 5 END,
+                     tipo_opcion,id
+            """,
+            params={"i":str(fecha_inicio),"f":str(fecha_fin)}, ttl=0,
+        )
+    except Exception:
+        return pd.DataFrame()
 
 
 def _render_reporte_produccion_fecha(fecha_iso, titulo=True, mostrar_nominal=True):
@@ -2882,6 +3068,7 @@ def render_coordinacion():
                 f"Enviada por {flujo.get('enviado_por') or 'AdminCasino'} "
                 f"· {str(flujo.get('enviado_at') or '')[:16].replace('T',' ')}"
             )
+            _render_documento_fuente_minuta(ini, fin, f"coord_pdf_{flujo_id}")
 
             df = conn.query(
                 """
@@ -2926,14 +3113,22 @@ def render_coordinacion():
                     key=f"coord_observacion_{flujo_id}",
                     placeholder="Obligatoria si observas la minuta. Indica claramente qué debe revisar Administración Casino."
                 )
-                st.caption("La decisión queda registrada con usuario, fecha, versión y trazabilidad al presionar el botón.")
+                clave_conf_coord=f"coord_confirmar_{flujo_id}"
+                st.checkbox(
+                    "Confirmo que revisé la propuesta completa del período",
+                    key=clave_conf_coord,
+                    help="La minuta no se autoriza ni observa si esta casilla no está marcada."
+                )
+                st.caption("La decisión queda registrada con usuario, fecha, versión y trazabilidad.")
 
                 if st.button(
                     "✅ AUTORIZAR MINUTA" if decision=="AUTORIZAR" else "🟠 ENVIAR OBSERVACIÓN",
                     type="primary", use_container_width=True,
                     key=f"coord_guardar_decision_{flujo_id}"
                 ):
-                    if decision=="OBSERVAR" and not observacion.strip():
+                    if not bool(st.session_state.get(clave_conf_coord, False)):
+                        st.warning("Confirma que revisaste la propuesta completa antes de guardar la decisión.")
+                    elif decision=="OBSERVAR" and not observacion.strip():
                         st.error("Debes indicar la observación antes de devolver la minuta.")
                     else:
                         nuevo_estado = "AUTORIZADA" if decision=="AUTORIZAR" else "OBSERVADA"
@@ -3072,12 +3267,80 @@ def generar_pdf_tabla_alemsi(titulo, periodo, df, columnas=None, total_texto="")
     doc.build(elems)
     return buffer.getvalue()
 
+
+def _actividad_sistema_general():
+    """Pulso agregado interno: incluye reservas comerciales, coordinadores y consumo interno ALEMSI."""
+    hoy = date.today()
+    hasta = hoy + timedelta(days=13)
+    try:
+        df = get_conn().query(
+            """
+            SELECT
+              COUNT(DISTINCT CASE
+                    WHEN fecha=:hoy AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
+                    THEN rut END) AS comensales_hoy,
+
+              COUNT(DISTINCT CASE
+                    WHEN LEFT(COALESCE(NULLIF(fecha_modificacion,''),fecha_creacion,''),10)=:hoy
+                    THEN COALESCE(
+                        NULLIF(TRIM(referencia_reserva),''),
+                        rut || '|' || LEFT(COALESCE(NULLIF(fecha_modificacion,''),fecha_creacion,''),16)
+                    )
+                    END) AS actividad_reservas_hoy,
+
+              COUNT(DISTINCT CASE
+                    WHEN fecha>=:hoy AND fecha<=:hasta
+                     AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
+                    THEN rut || '|' || fecha || '|' || servicio END) AS servicios_14d
+            FROM solicitudes
+            WHERE COALESCE(estado_reserva,'ACTIVA')='ACTIVA'
+            """,
+            params={"hoy": hoy.isoformat(), "hasta": hasta.isoformat()}, ttl=0,
+        )
+        if not df.empty:
+            r=df.iloc[0]
+            return (
+                int(r.get('comensales_hoy') or 0),
+                int(r.get('actividad_reservas_hoy') or 0),
+                int(r.get('servicios_14d') or 0),
+            )
+    except Exception:
+        pass
+    return 0,0,0
+
+def _render_subbanner_interno(rol):
+    """Banner interno único y estandarizado para todos los perfiles."""
+    hoy_txt=date.today().strftime('%d/%m/%Y')
+    activos, creadas, prox = _actividad_sistema_general()
+    if str(rol)=='Coordinacion':
+        contenido=(
+            f"<div style='font-size:12px;opacity:.9;letter-spacing:.04em'>ALEMSI · COORDINACIÓN</div>"
+            f"<div style='font-size:22px;font-weight:800;margin:3px 0'>{hoy_txt}</div>"
+            f"<div><span>Reservas activas hoy: <strong>{activos}</strong></span></div>"
+        )
+    else:
+        perfil=str(rol or 'Perfil').replace('AdminCasino','ADMINISTRACIÓN CASINO').replace('AdminTotal','ADMIN TOTAL').upper()
+        contenido=(
+            f"<div style='font-size:12px;opacity:.9;letter-spacing:.04em'>ALEMSI · {perfil}</div>"
+            f"<div style='font-size:22px;font-weight:800;margin:3px 0'>{hoy_txt}</div>"
+            f"<div style='display:flex;gap:18px;flex-wrap:wrap'>"
+            f"<span>Comensales activos hoy: <strong>{activos}</strong></span>"
+            f"<span>Actividad de reservas hoy: <strong>{creadas}</strong></span>"
+            f"<span>Servicios próximos 14 días: <strong>{prox}</strong></span></div>"
+        )
+    st.markdown(
+        f"""<div style='background:linear-gradient(135deg,#0A2F6B 0%,#0B6F68 55%,#086B37 100%);color:white;
+        border-radius:16px;padding:14px 18px;margin:4px 0 12px 0;box-shadow:0 8px 20px rgba(10,47,107,.10);font-size:.94rem'>
+        {contenido}</div>""",
+        unsafe_allow_html=True
+    )
+
 def render_casino():
     usuario = st.session_state.usuario
     roles_casino = ["Cocina", "Finanzas", "Bodega", "Coordinacion"]
     if usuario and usuario.get("rol") in roles_casino:
         rol = str(usuario["rol"])
-        st.markdown(f'<div class="al-card"><h3>{"Coordinación" if rol=="Coordinacion" else rol}</h3><p>¡Buen día, {usuario.get("nombre") or "equipo"}! Hoy es {datetime.now().strftime("%d/%m/%Y")}. Que tengan una excelente jornada.</p></div>', unsafe_allow_html=True)
+        _render_subbanner_interno(rol)
 
         if rol == "Coordinacion":
             render_coordinacion()
@@ -3096,15 +3359,6 @@ def render_casino():
                 st.session_state["_ultimo_modulo_cocina"] = modulo_cocina
                 _scroll_top()
 
-            # COORD-REC-37: reporte consolidado, sin hilos de correo ni modificación automática.
-            try:
-                obs_coord=get_conn().query("SELECT plato,version_receta,accion,observacion,usuario,fecha_accion,estado FROM receta_revision_coordinacion WHERE accion='OBSERVAR' ORDER BY fecha_accion DESC,id DESC",ttl=0)
-                if not obs_coord.empty:
-                    with st.expander(f"🤝 Observaciones de Coordinación sobre Recetas · {len(obs_coord)}",expanded=False):
-                        st.dataframe(_tabla_visible(obs_coord,{"plato":"Plato","version_receta":"Versión","accion":"Acción","observacion":"Observación","usuario":"Coordinación","fecha_accion":"Fecha / hora","estado":"Estado"},["fecha_accion"]),use_container_width=True,hide_index=True)
-                        st.download_button("⬇️ Descargar observaciones de recetas CSV",obs_coord.to_csv(index=False).encode("utf-8"),"observaciones_recetas_coordinacion.csv","text/csv",use_container_width=True,key="csv_obs_coord_recetas")
-            except Exception:
-                pass
             # INV-TAREA-01: bandeja de tareas ordenadas por Admin_Casino.
             conn_tareas = get_conn()
             df_tareas_cocina = conn_tareas.query(
@@ -3245,10 +3499,10 @@ def render_casino():
                 if min_hasta < min_desde:
                     st.error("La fecha hasta no puede ser anterior a la fecha desde.")
                 else:
-                    df_semana = get_minutas_rango(min_desde.isoformat(), min_hasta.isoformat())
+                    df_semana = _get_minutas_internas_rango(min_desde.isoformat(), min_hasta.isoformat())
                     fechas_vis = [min_desde + timedelta(days=i) for i in range((min_hasta-min_desde).days+1)]
                     _render_minuta_semanal(df_semana, fechas_visibles=fechas_vis, titulo_personalizado=f"📅 {min_desde.strftime('%d/%m/%Y')} → {min_hasta.strftime('%d/%m/%Y')}")
-                st.caption("Cocina visualiza la minuta en modo solo lectura. La gestión de minuta y recetas corresponde a perfiles autorizados.")
+                st.caption("Cocina visualiza la minuta interna en solo lectura, incluso durante revisión. Los comensales solo ven períodos PUBLICABLES.")
 
             if modulo_cocina == "▶️ Jornada de producción":
                 st.markdown("#### Jornada completa de producción")
@@ -3261,20 +3515,11 @@ def render_casino():
                     total_jornada = int(df_prod["reservadas"].sum())
                     total_alemsi = int(len(df_alemsi_personas)) if not df_alemsi_personas.empty else 0
                     total_otras = max(total_jornada - total_alemsi, 0)
-                    st.markdown(
-                        f"""
-                        <div style="background:linear-gradient(135deg,#0A2F6B,#086B37);color:white;padding:18px 20px;border-radius:16px;margin-bottom:12px">
-                          <div style="font-size:13px;opacity:.9">ALEMSI · PRODUCCIÓN DEL DÍA</div>
-                          <div style="font-size:24px;font-weight:800;margin:4px 0">{fecha_j.strftime('%d/%m/%Y')}</div>
-                          <div style="display:flex;gap:24px;flex-wrap:wrap">
-                            <b>Total a producir: {total_jornada}</b>
-                            <span>ALEMSI: {total_alemsi}</span>
-                            <span>Otras instituciones: {total_otras}</span>
-                          </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
+                    st.markdown(f"**Producción seleccionada · {fecha_j.strftime('%d/%m/%Y')}**")
+                    pm1,pm2,pm3=st.columns(3)
+                    pm1.metric("Total a producir", total_jornada)
+                    pm2.metric("ALEMSI", total_alemsi)
+                    pm3.metric("Otras instituciones", total_otras)
 
                     for servicio in ["Desayuno","Almuerzo","Once","Cena"]:
                         g = df_prod[df_prod["servicio"].astype(str)==servicio].copy()
@@ -3360,27 +3605,20 @@ def render_casino():
                         )
 
                 if estado == "Pendiente":
-                    clave_confirmacion_inicio = f"_confirmar_inicio_jornada_{fecha_iso}"
-                    iniciar_jornada = False
-                    if not st.session_state.get(clave_confirmacion_inicio, False):
-                        if st.button("▶️ INICIAR JORNADA", type="primary", use_container_width=True, key=f"preparar_inicio_jornada_{fecha_iso}"):
-                            st.session_state[clave_confirmacion_inicio] = True
-                            st.rerun()
-                    else:
-                        st.warning(
-                            "Vas a iniciar la jornada completa. Se congelará la producción y, cuando existan recetas aprobadas, "
-                            "se aplicará el descuento teórico de Bodega una sola vez."
-                        )
-                        ci1, ci2 = st.columns(2)
-                        with ci1:
-                            iniciar_jornada = st.button("✅ Sí, iniciar jornada", type="primary", use_container_width=True, key=f"confirmar_inicio_jornada_{fecha_iso}")
-                        with ci2:
-                            cancelar_inicio = st.button("Cancelar", use_container_width=True, key=f"cancelar_inicio_jornada_{fecha_iso}")
-                        if cancelar_inicio:
-                            st.session_state.pop(clave_confirmacion_inicio, None)
-                            st.rerun()
-                    if iniciar_jornada:
-                        st.session_state.pop(clave_confirmacion_inicio, None)
+                    clave_conf_inicio = f"conf_ini_j_{fecha_iso}"
+                    st.checkbox(
+                        f"Confirmo iniciar la jornada completa del {fecha_j.strftime('%d/%m/%Y')}",
+                        key=clave_conf_inicio,
+                        help="La jornada no se inicia si esta casilla no está marcada."
+                    )
+                    iniciar_jornada = st.button(
+                        "▶️ INICIAR JORNADA",
+                        type="primary", use_container_width=True,
+                        key=f"iniciar_jornada_{fecha_iso}"
+                    )
+                    if iniciar_jornada and not bool(st.session_state.get(clave_conf_inicio, False)):
+                        st.warning("Marca la casilla de confirmación antes de iniciar la jornada.")
+                    if iniciar_jornada and bool(st.session_state.get(clave_conf_inicio, False)):
                         sin_receta = []
                         sin_minuta = []
                         faltantes_stock = []
@@ -3477,8 +3715,22 @@ def render_casino():
                     faltan=[x for x in cierres if (x[2]!=x[1] or x[3]!=x[1]) and not str(x[4]).strip()]
                     if faltan:
                         st.warning("Hay diferencias sin motivo. Debes justificarlas antes de cerrar la jornada.")
-                    confirmar_fin=st.checkbox("Confirmo que revisé producción, entregas, diferencias y novedades", key=f"conf_fin_j_{fecha_iso}")
-                    if st.button("✅ FINALIZAR JORNADA", type="primary", use_container_width=True, disabled=(not confirmar_fin or bool(faltan))):
+                    clave_conf_cierre=f"conf_fin_j_{fecha_iso}"
+                    st.checkbox(
+                        "Confirmo que revisé producción, entregas, diferencias y novedades",
+                        key=clave_conf_cierre,
+                        help="Esta confirmación es obligatoria para evitar cerrar la jornada por error."
+                    )
+                    finalizar_jornada = st.button(
+                        "✅ FINALIZAR JORNADA",
+                        type="primary", use_container_width=True,
+                        key=f"finalizar_jornada_{fecha_iso}"
+                    )
+                    if finalizar_jornada and not bool(st.session_state.get(clave_conf_cierre, False)):
+                        st.warning("Marca la casilla de confirmación antes de finalizar la jornada.")
+                    elif finalizar_jornada and faltan:
+                        st.error("No puedes cerrar la jornada: existen diferencias sin motivo informado.")
+                    elif finalizar_jornada:
                         with conn.session as ses:
                             for idd,res,prod,ent,mot in cierres:
                                 execute_sql(ses,"UPDATE jornada_detalle SET producidas=%s,entregadas=%s,motivo_diferencia=%s WHERE id=%s",(prod,ent,mot,idd))
@@ -3837,9 +4089,14 @@ def render_casino():
                         key=f"fin_obs_bandeja_{ref_val}",
                     )
                     requiere_obs_val = nuevo_val == "RECHAZADO"
+                    clave_conf_fin = f"fin_confirmar_decision_{ref_val}"
+                    decision_confirmada = st.checkbox(
+                        "Confirmo esta decisión financiera",
+                        key=clave_conf_fin,
+                        help="Esta confirmación evita aprobar o rechazar un comprobante por error."
+                    )
                     st.caption(
-                        "La decisión se aplicará únicamente al presionar el botón. "
-                        "Para rechazar, la observación es obligatoria."
+                        "La casilla es obligatoria. Para rechazar, además debes indicar el motivo."
                     )
                     confirmar_revision = st.button(
                         "✅ APROBAR COMPROBANTE" if nuevo_val == "APROBADO" else "❌ RECHAZAR COMPROBANTE",
@@ -3848,6 +4105,9 @@ def render_casino():
                     )
 
                     if confirmar_revision:
+                        if not bool(st.session_state.get(clave_conf_fin, False)):
+                            st.warning("Marca ‘Confirmo esta decisión financiera’ antes de continuar.")
+                            return
                         if not archivo_disponible:
                             st.error("El comprobante no está disponible para validar. Revisa su almacenamiento antes de continuar.")
                             return
@@ -4141,7 +4401,7 @@ def render_admin():
     if st.session_state.usuario and st.session_state.usuario["rol"] in ["AdminTotal","AdminCasino","Operaciones","Gerencia","Bodega"]:
         rol_admin = str(st.session_state.usuario.get("rol", ""))
         nombre_perfil = {"AdminCasino":"Administrador de Casino","AdminTotal":"Administrador Total"}.get(rol_admin, rol_admin)
-        st.markdown(f'<div class="al-card"><h3>Hola, bienvenido/a</h3><p><b>Perfil: {nombre_perfil}</b></p></div>', unsafe_allow_html=True)
+        _render_subbanner_interno(rol_admin)
         usuario_admin = st.session_state.usuario.get("username")
         mapa_modulos = [
             ("📈 Dashboard","ver_dashboard",True),
@@ -4585,17 +4845,29 @@ def render_admin():
                         if p1 and p2 and p1.casefold()==p2.casefold():
                             conflictos.append({"Fecha":fconf,"Servicio":sconf,"Opciones":"Opción 1 / Opción 2","Plato":p1})
                     if conflictos:
-                        st.error("Conflicto de minuta: Opción 1 y Opción 2 repiten el mismo plato. Debe corregirse antes de enviar a Coordinación o publicar.")
+                        st.warning("Alerta preventiva de minuta: Opción 1 y Opción 2 repiten el mismo plato. La alerta queda visible para revisión, pero no bloquea el envío a Coordinación.")
                         st.dataframe(pd.DataFrame(conflictos),use_container_width=True,hide_index=True)
 
                     _asegurar_revision_coordinacion()
 
                     st.markdown("### 🤝 Validación por Coordinación")
-                    st.caption(
-                        "Una vez cargada la minuta del período, envíala a Coordinación para revisión. "
-                        "Coordinación puede Autorizar u Observar. Solo una minuta autorizada puede publicarse."
-                    )
                     _render_estado_coordinacion_admin(ini, fin)
+                    _render_documento_fuente_minuta(ini.isoformat(), fin.isoformat(), "admin_pdf_minuta")
+                    obs_g=_observaciones_gerencia_rango(ini.isoformat(),fin.isoformat())
+                    if not obs_g.empty:
+                        with st.expander(f"💬 Observaciones de Gerencia · {len(obs_g)}",expanded=False):
+                            st.dataframe(
+                                obs_g.rename(columns={"observacion":"Observación","usuario":"Gerencia","fecha_accion":"Fecha / hora","estado":"Estado"}),
+                                use_container_width=True,hide_index=True
+                            )
+
+                    puede_gestionar_flujo_minuta = rol_admin in ["AdminTotal","AdminCasino"]
+                    if puede_gestionar_flujo_minuta:
+                        st.caption(
+                            "Administración Casino envía la minuta a Coordinación y publica únicamente después de su autorización."
+                        )
+                    else:
+                        st.caption("Estado de revisión visible en modo consulta. Este perfil no puede enviar, autorizar ni publicar minutas.")
 
                     actual_coord = _flujo_minuta_actual(ini.isoformat(), fin.isoformat())
                     estado_coord = str(actual_coord.iloc[0].get("estado") or "") if not actual_coord.empty else ""
@@ -4610,25 +4882,19 @@ def render_admin():
                             "🔎 Revisar / auditar minuta",
                             use_container_width=True,
                             key="auditar_minuta_periodo",
-                            disabled=bool(conflictos)
+                            disabled=(not puede_gestionar_flujo_minuta)
                         ):
-                            with conn.session as ses:
-                                execute_sql(
-                                    ses,
-                                    "UPDATE minutas SET estado='AUDITADA' "
-                                    "WHERE activo=1 AND fecha>=%s AND fecha<=%s "
-                                    "AND COALESCE(estado,'BORRADOR') IN ('BORRADOR','PUBLICABLE')",
-                                    (ini.isoformat(),fin.isoformat())
-                                )
-                                ses.commit()
+                            # RC7: auditar es una acción de trazabilidad, no cambia el
+                            # estado de publicación de la minuta. El flujo de Coordinación
+                            # vive en minuta_flujo_coordinacion.
                             registrar_auditoria(
                                 st.session_state.usuario.get('username'),
                                 'AUDITAR_MINUTA','minutas',
                                 f"{ini.isoformat()}..{fin.isoformat()}",
-                                'BORRADOR/PUBLICABLE','AUDITADA',
-                                'Revisión previa al envío a Coordinación'
+                                'SIN_CAMBIO','SIN_CAMBIO',
+                                'Revisión previa al envío a Coordinación; publicación intacta'
                             )
-                            st.session_state["_flash_minuta"]="✅ Minuta revisada. Ya puedes enviarla a Coordinación."
+                            st.session_state["_flash_minuta"]="✅ Revisión registrada. La minuta mantiene su estado de publicación y ya puedes enviarla a Coordinación."
                             st.rerun()
 
                     with ab2:
@@ -4638,8 +4904,8 @@ def render_admin():
                             else "📤 Enviar a Coordinación"
                         )
                         envio_bloqueado = (
-                            not tiene_minuta
-                            or bool(conflictos)
+                            not puede_gestionar_flujo_minuta
+                            or not tiene_minuta
                             or estado_coord in ["EN_REVISION","AUTORIZADA","PUBLICADA"]
                         )
                         if st.button(
@@ -4649,17 +4915,8 @@ def render_admin():
                             disabled=envio_bloqueado,
                             type="primary"
                         ):
-                            # Al enviar, cualquier fila BORRADOR/PUBLICABLE del período queda
-                            # marcada AUDITADA, sin modificar platos ni contenido.
-                            with conn.session as ses:
-                                execute_sql(
-                                    ses,
-                                    "UPDATE minutas SET estado='AUDITADA' "
-                                    "WHERE activo=1 AND fecha>=%s AND fecha<=%s "
-                                    "AND COALESCE(estado,'BORRADOR') IN ('BORRADOR','PUBLICABLE')",
-                                    (ini.isoformat(),fin.isoformat())
-                                )
-                                ses.commit()
+                            # RC7: enviar a Coordinación crea/versiona el flujo de revisión,
+                            # pero NO modifica estado de publicación de la minuta.
                             version_coord = _enviar_minuta_coordinacion(
                                 ini.isoformat(),fin.isoformat(),
                                 st.session_state.usuario.get('username')
@@ -4670,7 +4927,10 @@ def render_admin():
                             st.rerun()
 
                     with ab3:
-                        publicar_habilitado = estado_coord=="AUTORIZADA" and not bool(conflictos)
+                        publicar_habilitado = (
+                            puede_gestionar_flujo_minuta
+                            and estado_coord=="AUTORIZADA" 
+                        )
                         if st.button(
                             "✅ Publicar período",
                             use_container_width=True,
@@ -4682,7 +4942,7 @@ def render_admin():
                                     ses,
                                     "UPDATE minutas SET estado='PUBLICABLE' "
                                     "WHERE activo=1 AND fecha>=%s AND fecha<=%s "
-                                    "AND estado IN ('AUDITADA','BORRADOR')",
+                                    "AND COALESCE(estado,'BORRADOR')='BORRADOR'",
                                     (ini.isoformat(),fin.isoformat())
                                 )
                                 execute_sql(
@@ -4701,7 +4961,7 @@ def render_admin():
                                 st.session_state.usuario.get('username'),
                                 'PUBLICAR_MINUTA','minutas',
                                 f"{ini.isoformat()}..{fin.isoformat()}",
-                                'AUTORIZADA','PUBLICABLE',
+                                'BORRADOR','PUBLICABLE',
                                 'Publicación posterior a autorización de Coordinación'
                             )
                             get_minutas_rango.clear()
@@ -4718,7 +4978,7 @@ def render_admin():
                             st.rerun()
 
                     if conflictos:
-                        st.warning("La validación por Coordinación está visible, pero el envío queda bloqueado hasta corregir los conflictos indicados arriba.")
+                        st.warning("Alerta preventiva: se detectaron coincidencias entre opciones. Puedes revisar, enviar a Coordinación y continuar el flujo; la alerta no bloquea la minuta.")
                     elif not tiene_minuta:
                         st.info("Carga primero una minuta dentro del período seleccionado.")
                     elif estado_coord=="EN_REVISION":
@@ -4729,6 +4989,52 @@ def render_admin():
                         st.warning("La minuta cambió después del envío/autorización. Debe reenviarse a Coordinación.")
                     elif estado_coord=="AUTORIZADA":
                         st.success("Coordinación autorizó completamente esta propuesta. Ya puedes publicarla.")
+
+            if rol_admin == "Gerencia":
+                st.info("Gerencia visualiza la minuta y puede registrar observaciones. No modifica platos ni reemplaza la autorización de Coordinación.")
+                _render_documento_fuente_minuta(ini.isoformat(), fin.isoformat(), "gerencia_pdf_minuta")
+                obs_prev=_observaciones_gerencia_rango(ini.isoformat(),fin.isoformat())
+                if not obs_prev.empty:
+                    st.dataframe(
+                        obs_prev.rename(columns={"observacion":"Observación","usuario":"Gerencia","fecha_accion":"Fecha / hora","estado":"Estado"}),
+                        use_container_width=True,hide_index=True
+                    )
+                obs_nueva=st.text_area(
+                    "Observación de Gerencia",
+                    key=f"obs_gerencia_{ini}_{fin}",
+                    placeholder="Registra una observación para Administración Casino. No autoriza ni modifica la minuta."
+                )
+                conf_ger=st.checkbox(
+                    "Confirmo enviar esta observación a Administración Casino",
+                    key=f"conf_obs_ger_{ini}_{fin}"
+                )
+                if st.button("💬 Registrar observación de Gerencia",use_container_width=True,key=f"guardar_obs_ger_{ini}_{fin}"):
+                    if not conf_ger:
+                        st.warning("Marca la confirmación antes de registrar la observación.")
+                    elif not obs_nueva.strip():
+                        st.error("Escribe la observación antes de continuar.")
+                    else:
+                        ahora=datetime.now().isoformat()
+                        with conn.session as ses:
+                            execute_sql(
+                                ses,
+                                "INSERT INTO minuta_observaciones_gerencia (fecha_desde,fecha_hasta,observacion,usuario,fecha_accion,estado) VALUES (%s,%s,%s,%s,%s,'ABIERTA')",
+                                (ini.isoformat(),fin.isoformat(),obs_nueva.strip(),st.session_state.usuario.get('username'),ahora)
+                            )
+                            ses.commit()
+                        registrar_auditoria(
+                            st.session_state.usuario.get('username'),
+                            'OBSERVAR_MINUTA_GERENCIA',
+                            'minuta_observaciones_gerencia',
+                            f"{ini.isoformat()}..{fin.isoformat()}",
+                            '',
+                            'ABIERTA',
+                            obs_nueva.strip()
+                        )
+                        st.success("Observación de Gerencia registrada para Administración Casino.")
+                        st.rerun()
+                return
+
             _sincronizar_maestro_platos()
             with st.expander("📚 Maestro de Platos · catálogo reutilizable", expanded=False):
                 st.caption("Fuente única para crear minutas. Los platos históricos de Minutas se incorporan al maestro sin modificar costos ni recetas.")
@@ -4934,8 +5240,145 @@ def render_admin():
                         get_minutas_rango.clear()
                         st.session_state["_flash_minuta"] = "✅ Minuta guardada como BORRADOR. Audítala antes de publicar."
                         st.rerun()
-            with st.expander("Carga masiva CSV"):
-                st.caption("Columnas: fecha, servicio, tipo_opcion, plato"); archivo_csv=st.file_uploader("Archivo CSV",type=["csv"],key="minuta_csv_admin")
+            with st.expander("📄 Cargar minuta desde PDF o CSV", expanded=False):
+                _asegurar_documentos_minuta_y_gerencia()
+                st.caption(
+                    "PDF es la vía principal: se conserva el original, se extrae una propuesta y Administración Casino "
+                    "revisa/corrige antes de incorporarla. CSV queda como alternativa masiva estructurada."
+                )
+                pdf_min=st.file_uploader("Minuta original en PDF",type=["pdf"],key="minuta_pdf_admin")
+                if pdf_min is not None:
+                    pdf_bytes=pdf_min.getvalue()
+                    texto_pdf=_extraer_texto_pdf_minuta(pdf_bytes)
+                    propuesta=_preparsear_minuta_pdf(texto_pdf)
+                    st.caption(
+                        "Vista previa extraída del PDF. Corrige o agrega filas antes de confirmar; "
+                        "nunca se publica automáticamente lo interpretado."
+                    )
+                    if propuesta.empty:
+                        st.warning(
+                            "No fue posible estructurar filas automáticamente. Puedes agregarlas manualmente "
+                            "en la tabla y conservar igualmente el PDF como documento fuente."
+                        )
+                        propuesta=pd.DataFrame([{
+                            "fecha":date.today().isoformat(),
+                            "servicio":"Almuerzo",
+                            "tipo_opcion":"OPCION 1",
+                            "plato":""
+                        }])
+                    edit_pdf=st.data_editor(
+                        propuesta,
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        hide_index=True,
+                        key="editor_pdf_minuta",
+                        column_config={
+                            "fecha":st.column_config.TextColumn("Fecha YYYY-MM-DD",required=True),
+                            "servicio":st.column_config.SelectboxColumn(
+                                "Servicio",
+                                options=["Desayuno","Almuerzo","Once","Cena"],
+                                required=True
+                            ),
+                            "tipo_opcion":st.column_config.SelectboxColumn(
+                                "Opción",
+                                options=["OPCION 1","OPCION 2","OPCION 3","HIPOCALORICO","TIPO R"],
+                                required=True
+                            ),
+                            "plato":st.column_config.TextColumn("Plato",required=True),
+                        }
+                    )
+                    conf_pdf=st.checkbox(
+                        "Confirmo que revisé la minuta extraída del PDF antes de incorporarla",
+                        key="conf_pdf_minuta"
+                    )
+                    if st.button(
+                        "📥 Incorporar PDF como minuta BORRADOR",
+                        type="primary",
+                        use_container_width=True,
+                        key="confirmar_pdf_minuta"
+                    ):
+                        if not conf_pdf:
+                            st.warning("Marca la confirmación después de revisar la propuesta extraída.")
+                        else:
+                            limpia=edit_pdf.copy()
+                            limpia["plato"]=limpia["plato"].fillna("").astype(str).str.strip()
+                            limpia=limpia[limpia["plato"]!=""]
+                            filas_ok=[]
+                            errores=[]
+                            for _,rr in limpia.iterrows():
+                                try:
+                                    fi=pd.to_datetime(rr["fecha"]).date()
+                                    serv=str(rr["servicio"]).strip()
+                                    op=str(rr["tipo_opcion"]).strip()
+                                    plato=str(rr["plato"]).strip()
+                                    if serv not in ["Desayuno","Almuerzo","Once","Cena"] or not op or not plato:
+                                        raise ValueError("Campos incompletos")
+                                    filas_ok.append((fi,serv,op,plato))
+                                except Exception:
+                                    errores.append(1)
+                            if errores or not filas_ok:
+                                st.error("Hay filas incompletas o con fecha inválida. Corrige la tabla antes de incorporar.")
+                            else:
+                                fechas=[x[0] for x in filas_ok]
+                                doc_id=_guardar_documento_minuta(
+                                    pdf_min.name,
+                                    pdf_min.type or "application/pdf",
+                                    pdf_bytes,
+                                    min(fechas).isoformat(),
+                                    max(fechas).isoformat(),
+                                    st.session_state.usuario.get("username"),
+                                    "PDF original de minuta"
+                                )
+                                with conn.session as ses:
+                                    for fi,serv,op,plato in filas_ok:
+                                        dnom=["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"][fi.weekday()]
+                                        ex=execute_sql(
+                                            ses,
+                                            "SELECT id FROM minutas WHERE fecha=%s AND servicio=%s AND tipo_opcion=%s ORDER BY id LIMIT 1",
+                                            (fi.isoformat(),serv,op)
+                                        ).first()
+                                        if ex:
+                                            execute_sql(
+                                                ses,
+                                                "UPDATE minutas SET plato=%s,dia_semana=%s,activo=1,estado='BORRADOR' WHERE id=%s",
+                                                (plato,dnom,ex[0])
+                                            )
+                                        else:
+                                            execute_sql(
+                                                ses,
+                                                "INSERT INTO minutas (fecha,dia_semana,servicio,tipo_opcion,plato,activo,estado) "
+                                                "VALUES (%s,%s,%s,%s,%s,1,'BORRADOR')",
+                                                (fi.isoformat(),dnom,serv,op,plato)
+                                            )
+                                    ses.commit()
+                                _sincronizar_maestro_platos()
+                                for fmod in sorted({x[0].isoformat() for x in filas_ok}):
+                                    _invalidar_autorizacion_minuta(
+                                        fmod,
+                                        st.session_state.usuario.get("username"),
+                                        f"Carga PDF modificó la minuta · documento {doc_id}"
+                                    )
+                                get_minutas_rango.clear()
+                                registrar_auditoria(
+                                    st.session_state.usuario.get("username"),
+                                    "IMPORTAR_MINUTA_PDF",
+                                    "minutas",
+                                    str(doc_id),
+                                    "",
+                                    "BORRADOR",
+                                    f"{len(filas_ok)} filas"
+                                )
+                                st.success(
+                                    f"PDF incorporado y {len(filas_ok)} filas guardadas en BORRADOR. "
+                                    "Revisa conflictos y luego envía a Coordinación."
+                                )
+                                st.rerun()
+                st.divider()
+                archivo_csv=st.file_uploader(
+                    "Alternativa: archivo CSV estructurado",
+                    type=["csv"],
+                    key="minuta_csv_admin"
+                )
                 if archivo_csv is not None:
                     try:
                         vista=pd.read_csv(archivo_csv); st.dataframe(vista.head(30),use_container_width=True,hide_index=True)

@@ -1,0 +1,21 @@
+{
+  "version": "ALEMSI v2.1.3.44-RC7",
+  "problema_raiz": "Se mezcló estado de publicación de minutas con estado de revisión interna.",
+  "correccion": [
+    "Auditar no cambia PUBLICABLE/BORRADOR.",
+    "Enviar a Coordinación no cambia PUBLICABLE/BORRADOR.",
+    "Coordinación usa minuta_flujo_coordinacion para EN_REVISION/OBSERVADA/AUTORIZADA/PUBLICADA.",
+    "Publicar convierte únicamente BORRADOR a PUBLICABLE.",
+    "Las 67 filas AUDITADA afectadas fueron restauradas en la base real a PUBLICABLE."
+  ],
+  "checks": {
+    "compile": true,
+    "ast": true,
+    "common_intacto": true,
+    "audit_no_muta_publicacion": true,
+    "send_no_muta_publicacion": true,
+    "publish_borrador_only": true,
+    "48h_preservado": true,
+    "dashboard_alemsi_preservado": true
+  }
+}
