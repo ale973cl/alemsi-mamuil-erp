@@ -1,0 +1,34 @@
+{
+  "version": "ALEMSI v2.1.3.47-RC10",
+  "objetivo": "Corregir navegación del perfil Comensal sin alterar reglas de negocio.",
+  "cambio_principal": "Paso 2 carga y presenta todos los días seleccionados en una sola pantalla; elimina la obligación de navegar Día 1/Día 2/Día 3.",
+  "circuito": [
+    "Seleccionar fechas",
+    "Cargar minuta del rango una sola vez",
+    "Completar todos los días/servicios en pantalla",
+    "Validar Consumiré/No consumiré y al menos un plato por día",
+    "Revisar reserva",
+    "Confirmar y guardar"
+  ],
+  "preservado": [
+    "cut-off configurable",
+    "máximo de días consecutivos",
+    "bloqueo financiero",
+    "pago",
+    "código de reserva",
+    "Minutas/Coordinador",
+    "Cocina",
+    "Bodega"
+  ],
+  "checks": {
+    "python_compile": true,
+    "ast_parse": true,
+    "rc10_bulk_navigation": true,
+    "no_forced_day_wizard_commercial": true,
+    "48h_rule_preserved": true,
+    "explicit_consumption_preserved": true,
+    "at_least_one_plate_preserved": true,
+    "bodega_admin_intacta": true,
+    "coordinador_intacto": true
+  }
+}

@@ -1,4 +1,4 @@
-# ALEMSI v2.1.3.46-RC9 · Presentación estable / circuitos end-to-end - estabilización de confirmaciones, permisos y validación de minutas
+# ALEMSI v2.1.3.47-RC10 · Presentación estable / circuitos end-to-end - estabilización de confirmaciones, permisos y validación de minutas
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -2085,6 +2085,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                 if not st.session_state.get("reserva_revisar", False):
                     titulo_paso = "🍽️ Paso 2: Declara tu consumo" if es_alemsi else "🍽️ Paso 2: Elige la minuta"
                     st.markdown(f"#### {titulo_paso}")
+
                     if not df_minutas.empty:
                         _render_minuta_semanal(
                             df_minutas,
@@ -2092,179 +2093,275 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                             titulo=True,
                             titulo_personalizado="📅 Minuta de las fechas seleccionadas",
                         )
-                    if es_alemsi:
-                        st.caption("Avanza día por día. Para cada fecha declara los servicios internos disponibles.")
-                    else:
-                        st.caption(
-                            "Avanza día por día. Cada fecha debe tener al menos un servicio seleccionado. "
-                            f"El valor del día es {formato_clp(precio_dia)}, independiente de la cantidad de servicios elegidos."
-                        )
 
-                    idx = int(st.session_state.get("wizard_idx", 0) or 0)
-                    idx = max(0, min(idx, len(dias)-1))
-                    st.session_state.wizard_idx = idx
-                    f_iso = dias[idx]
-                    f_obj = date.fromisoformat(f_iso)
-                    dnom = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"][f_obj.weekday()]
-                    filas_fecha = df_minutas[df_minutas["fecha"].astype(str) == f_iso] if not df_minutas.empty else pd.DataFrame()
-                    st.markdown(f"### Día {idx+1} de {len(dias)} · {dnom} {f_obj.strftime('%d/%m/%Y')}")
+                    # RC10-NAV: la minuta del rango ya está cargada en df_minutas.
+                    # El usuario completa todos los días en una sola pantalla; no existe
+                    # navegación obligatoria Día 1 → Día 2 → Día 3.
+                    st.info(
+                        "Completa todos los días seleccionados en esta misma pantalla. "
+                        "Tus elecciones se mantienen mientras revisas el período."
+                    )
 
-                    elecciones_dia = {}
-                    with st.form(f"menu_dia_{f_iso}", clear_on_submit=False):
-                        if es_alemsi:
-                            # PROD-35: toda ración interna ALEMSI requiere selección explícita.
-                            # Paso Fronterizo: Opción 1 o Hipocalórico. Administrativos: cualquiera de las 3 opciones del Almuerzo.
-                            orden_servicios_int = ["Desayuno", "Almuerzo", "Once", "Cena"]
-                            servicios_internos = ["Almuerzo"] if tipo_alemsi == "administrativos" else orden_servicios_int
-                            tipos_permitidos = {"OPCION 1", "OPCIÓN 1", "HIPOCALORICO", "HIPOCALÓRICO", "TIPO R"} if tipo_alemsi == "paso" else {"OPCION 1", "OPCIÓN 1", "OPCION 2", "OPCIÓN 2", "HIPOCALORICO", "HIPOCALÓRICO", "TIPO R"}
-                            disponibles = 0
-                            for servicio in servicios_internos:
-                                if not reserva_modificable(f_iso, servicio):
-                                    st.caption(f"{servicio}: fuera del plazo mínimo de 48 horas.")
-                                    continue
-                                grupo = filas_fecha[filas_fecha["servicio"].astype(str) == servicio].copy() if not filas_fecha.empty else pd.DataFrame()
-                                if grupo.empty:
-                                    continue
-                                grupo["tipo_norm"] = grupo["tipo_opcion"].fillna("").astype(str).str.strip().str.upper()
-                                grupo = grupo[grupo["tipo_norm"].isin(tipos_permitidos)]
-                                if grupo.empty:
-                                    continue
-                                disponibles += 1
-                                tokens = [""]
-                                etiquetas = {"": f"— No reservar {servicio.lower()} —"}
-                                mapa = {}
-                                for pos, (_, rr) in enumerate(grupo.iterrows()):
-                                    tipo = str(rr.get("tipo_opcion") or "").strip()
-                                    plato = str(rr.get("plato") or "").strip()
-                                    token = f"{pos}|{tipo}|{plato}"
-                                    tokens.append(token); mapa[token] = {"plato": plato, "tipo_opcion": tipo, "estado": "Consumirá"}
-                                    etiquetas[token] = f"{tipo}: {plato}"
-                                actual = st.session_state.pedidos.get(f_iso, {}).get(servicio, {})
-                                actual_plato = actual.get("plato", "") if isinstance(actual, dict) else ""
-                                indice = 0
-                                for it, tok in enumerate(tokens):
-                                    if tok and tok.split("|", 2)[2] == actual_plato:
-                                        indice = it; break
-                                st.markdown(f"**{servicio}**")
-                                elegido = st.selectbox(
-                                    f"Selecciona tu opción de {servicio}", tokens, index=indice,
-                                    format_func=lambda tok, labels=etiquetas: labels.get(tok, tok),
-                                    key=f"alemsi_menu_{tipo_alemsi}_{f_iso}_{servicio}",
+                    elecciones_periodo = {}
+                    decisiones_periodo = {}
+                    dias_sin_opciones = []
+
+                    with st.form("menu_periodo_completo_rc10", clear_on_submit=False):
+                        for pos_dia, f_iso in enumerate(dias, start=1):
+                            f_obj = date.fromisoformat(f_iso)
+                            dnom = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"][f_obj.weekday()]
+                            filas_fecha = (
+                                df_minutas[df_minutas["fecha"].astype(str) == f_iso].copy()
+                                if not df_minutas.empty else pd.DataFrame()
+                            )
+                            elecciones_periodo[f_iso] = {}
+                            decisiones_periodo[f_iso] = {}
+
+                            st.markdown(
+                                f"### {dnom} {f_obj.strftime('%d/%m/%Y')} "
+                                f"· Día {pos_dia} de {len(dias)}"
+                            )
+
+                            if es_alemsi:
+                                orden_servicios_int = ["Desayuno", "Almuerzo", "Once", "Cena"]
+                                servicios_internos = (
+                                    ["Almuerzo"] if tipo_alemsi == "administrativos"
+                                    else orden_servicios_int
                                 )
-                                if elegido:
-                                    elecciones_dia[servicio] = mapa[elegido]
-                            if disponibles == 0:
-                                st.warning("No existen opciones habilitadas para este perfil ALEMSI en esta fecha.")
-                        else:
-                            orden_servicios = ["Desayuno", "Almuerzo", "Once", "Cena"]
-                            iconos_servicio = {"Desayuno":"🍳", "Almuerzo":"🍽️", "Once":"☕", "Cena":"🌙"}
-                            opciones_por_servicio = {}
-                            if not filas_fecha.empty:
-                                for servicio, grupo in filas_fecha.groupby("servicio", sort=False):
-                                    nombre_servicio = str(servicio)
-                                    opciones_por_servicio[nombre_servicio] = [
-                                        {"plato": str(row["plato"]), "tipo": str(row.get("tipo_opcion") or "").strip()}
-                                        for _, row in grupo.iterrows()
-                                    ]
-                            if not opciones_por_servicio:
-                                st.warning("No existe minuta configurada para esta fecha.")
-                            servicios_visibles = [x for x in orden_servicios if opciones_por_servicio.get(x)]
-                            servicios_visibles += sorted([x for x in opciones_por_servicio if x not in servicios_visibles])
-                            servicios_fuera_48h = [s for s in servicios_visibles if not _reserva_comercial_habilitada(f_iso, s)]
-                            servicios_visibles = [s for s in servicios_visibles if _reserva_comercial_habilitada(f_iso, s)]
-                            if servicios_fuera_48h:
-                                st.caption(
-                                    f"Fuera del plazo de reserva ({_reglas_reserva()['anticipacion_reserva_horas']} h): " + ", ".join(servicios_fuera_48h) + "."
+                                tipos_permitidos = (
+                                    {"OPCION 1", "OPCIÓN 1", "HIPOCALORICO", "HIPOCALÓRICO", "TIPO R"}
+                                    if tipo_alemsi == "paso"
+                                    else {
+                                        "OPCION 1", "OPCIÓN 1", "OPCION 2", "OPCIÓN 2",
+                                        "HIPOCALORICO", "HIPOCALÓRICO", "TIPO R"
+                                    }
                                 )
-                            decisiones_dia={}
-                            for servicio in servicios_visibles:
-                                registros = opciones_por_servicio.get(servicio, [])
-                                icono = iconos_servicio.get(servicio, "🍴")
-                                with st.expander(f"{icono} {servicio}", expanded=True):
-                                    st.caption(f"Reserva disponible hasta: {_cierre_reserva_visible(f_iso, servicio)}")
-                                    actual_plato = st.session_state.pedidos.get(f_iso, {}).get(servicio, "")
-                                    estado_inicial = "Consumiré" if actual_plato else "— Selecciona —"
-                                    decision=st.radio(
-                                        f"¿Consumirás {servicio.lower()}?",
-                                        ["— Selecciona —","Consumiré","No consumiré"],
-                                        index=["— Selecciona —","Consumiré","No consumiré"].index(estado_inicial),
-                                        horizontal=True,
-                                        key=f"decision_serv_{f_iso}_{servicio}",
+                                disponibles = 0
+                                for servicio in servicios_internos:
+                                    if not reserva_modificable(f_iso, servicio):
+                                        continue
+                                    grupo = (
+                                        filas_fecha[filas_fecha["servicio"].astype(str) == servicio].copy()
+                                        if not filas_fecha.empty else pd.DataFrame()
                                     )
-                                    decisiones_dia[servicio]=decision
-                                    if decision=="Consumiré":
-                                        tokens=[""]
-                                        etiquetas={"":"— Selecciona un plato —"}
-                                        for pos,registro in enumerate(registros):
-                                            token=f"{pos}|{registro['tipo']}|{registro['plato']}"
+                                    if grupo.empty:
+                                        continue
+                                    grupo["tipo_norm"] = (
+                                        grupo["tipo_opcion"].fillna("").astype(str).str.strip().str.upper()
+                                    )
+                                    grupo = grupo[grupo["tipo_norm"].isin(tipos_permitidos)]
+                                    if grupo.empty:
+                                        continue
+
+                                    disponibles += 1
+                                    tokens = [""]
+                                    etiquetas = {"": f"— No reservar {servicio.lower()} —"}
+                                    mapa = {}
+                                    for idx_rr, (_, rr) in enumerate(grupo.iterrows()):
+                                        tipo = str(rr.get("tipo_opcion") or "").strip()
+                                        plato = str(rr.get("plato") or "").strip()
+                                        token = f"{idx_rr}|{tipo}|{plato}"
+                                        tokens.append(token)
+                                        etiquetas[token] = f"{tipo}: {plato}" if tipo else plato
+                                        mapa[token] = {
+                                            "plato": plato,
+                                            "tipo_opcion": tipo,
+                                            "estado": "Consumirá",
+                                        }
+
+                                    actual = st.session_state.pedidos.get(f_iso, {}).get(servicio, {})
+                                    actual_plato = actual.get("plato", "") if isinstance(actual, dict) else ""
+                                    indice = 0
+                                    if actual_plato:
+                                        for idx_token, token in enumerate(tokens):
+                                            if token and token.split("|", 2)[2] == actual_plato:
+                                                indice = idx_token
+                                                break
+
+                                    elegido = st.selectbox(
+                                        f"{servicio} · {f_obj.strftime('%d/%m')}",
+                                        tokens,
+                                        index=indice,
+                                        format_func=lambda token, etiquetas=etiquetas: etiquetas[token],
+                                        key=f"rc10_alemsi_{f_iso}_{servicio}",
+                                    )
+                                    if elegido:
+                                        elecciones_periodo[f_iso][servicio] = mapa[elegido]
+
+                                if disponibles == 0:
+                                    dias_sin_opciones.append(f_iso)
+                                    st.warning("No existen opciones habilitadas para este perfil ALEMSI en esta fecha.")
+
+                            else:
+                                orden_servicios = ["Desayuno", "Almuerzo", "Once", "Cena"]
+                                iconos_servicio = {
+                                    "Desayuno":"🍳", "Almuerzo":"🍽️", "Once":"☕", "Cena":"🌙"
+                                }
+                                opciones_por_servicio = {}
+                                if not filas_fecha.empty:
+                                    for servicio, grupo in filas_fecha.groupby("servicio", sort=False):
+                                        nombre_servicio = str(servicio)
+                                        opciones_por_servicio[nombre_servicio] = [
+                                            {
+                                                "plato": str(row["plato"]),
+                                                "tipo": str(row.get("tipo_opcion") or "").strip(),
+                                            }
+                                            for _, row in grupo.iterrows()
+                                        ]
+
+                                servicios_visibles = [
+                                    x for x in orden_servicios if opciones_por_servicio.get(x)
+                                ]
+                                servicios_visibles += sorted([
+                                    x for x in opciones_por_servicio if x not in servicios_visibles
+                                ])
+                                servicios_visibles = [
+                                    s for s in servicios_visibles
+                                    if _reserva_comercial_habilitada(f_iso, s)
+                                ]
+
+                                if not servicios_visibles:
+                                    dias_sin_opciones.append(f_iso)
+                                    st.warning("No hay servicios habilitados para reserva en esta fecha.")
+
+                                for servicio in servicios_visibles:
+                                    registros = opciones_por_servicio.get(servicio, [])
+                                    icono = iconos_servicio.get(servicio, "🍴")
+                                    st.markdown(f"**{icono} {servicio}**")
+                                    st.caption(
+                                        f"Reserva disponible hasta: {_cierre_reserva_visible(f_iso, servicio)}"
+                                    )
+
+                                    actual_plato = st.session_state.pedidos.get(f_iso, {}).get(servicio, "")
+                                    key_decision = f"rc10_decision_{f_iso}_{servicio}"
+                                    opciones_decision = ["— Selecciona —", "Consumiré", "No consumiré"]
+
+                                    if key_decision in st.session_state:
+                                        estado_inicial = st.session_state[key_decision]
+                                    else:
+                                        estado_inicial = "Consumiré" if actual_plato else "— Selecciona —"
+
+                                    decision = st.radio(
+                                        f"¿Consumirás {servicio.lower()}?",
+                                        opciones_decision,
+                                        index=opciones_decision.index(
+                                            estado_inicial if estado_inicial in opciones_decision
+                                            else "— Selecciona —"
+                                        ),
+                                        horizontal=True,
+                                        key=key_decision,
+                                    )
+                                    decisiones_periodo[f_iso][servicio] = decision
+
+                                    if decision == "Consumiré":
+                                        tokens = [""]
+                                        etiquetas = {"": "— Selecciona un plato —"}
+                                        for idx_reg, registro in enumerate(registros):
+                                            token = f"{idx_reg}|{registro['tipo']}|{registro['plato']}"
                                             tokens.append(token)
-                                            prefijo=f"{registro['tipo']}: " if registro['tipo'] else ""
-                                            etiquetas[token]=f"{prefijo}{registro['plato']}"
-                                        indice=0
+                                            prefijo = f"{registro['tipo']}: " if registro['tipo'] else ""
+                                            etiquetas[token] = f"{prefijo}{registro['plato']}"
+
+                                        indice = 0
                                         if actual_plato:
-                                            for idx_token,token in enumerate(tokens):
-                                                if token and token.split("|",2)[2]==actual_plato:
-                                                    indice=idx_token; break
-                                        elegido=st.selectbox(
-                                            f"Plato de {servicio}",tokens,index=indice,
-                                            format_func=lambda token,mapa=etiquetas:mapa[token],
-                                            key=f"menu_v2132_{f_iso}_{servicio}",
+                                            for idx_token, token in enumerate(tokens):
+                                                if token and token.split("|", 2)[2] == actual_plato:
+                                                    indice = idx_token
+                                                    break
+
+                                        elegido = st.selectbox(
+                                            f"Plato de {servicio}",
+                                            tokens,
+                                            index=indice,
+                                            format_func=lambda token, etiquetas=etiquetas: etiquetas[token],
+                                            key=f"rc10_menu_{f_iso}_{servicio}",
                                         )
                                         if elegido:
-                                            elecciones_dia[servicio]=elegido.split("|",2)[2]
+                                            elecciones_periodo[f_iso][servicio] = elegido.split("|", 2)[2]
+                                    st.divider()
 
-                        st.divider()
-                        c1, c2, c3 = st.columns(3)
+                        c1, c2 = st.columns(2)
                         with c1:
-                            cambiar = st.form_submit_button("← Cambiar fechas", use_container_width=True)
+                            cambiar = st.form_submit_button(
+                                "← Cambiar fechas", use_container_width=True
+                            )
                         with c2:
-                            anterior = st.form_submit_button("← Día anterior", use_container_width=True, disabled=idx==0)
-                        with c3:
-                            etiqueta = "Revisar reserva →" if idx == len(dias)-1 else "Siguiente día →"
-                            siguiente = st.form_submit_button(etiqueta, type="primary", use_container_width=True)
+                            revisar = st.form_submit_button(
+                                "Revisar reserva →",
+                                type="primary",
+                                use_container_width=True,
+                            )
 
                     if cambiar:
                         st.session_state.dias_sel = []
                         st.session_state.pedidos = {}
                         st.session_state.wizard_idx = 0
                         st.session_state.reserva_revisar = False
+                        # Limpiar únicamente widgets del selector RC10.
+                        for k in list(st.session_state.keys()):
+                            if str(k).startswith(("rc10_decision_", "rc10_menu_", "rc10_alemsi_")):
+                                st.session_state.pop(k, None)
                         st.rerun()
-                    if anterior:
-                        if elecciones_dia:
-                            st.session_state.pedidos[f_iso] = elecciones_dia
-                        st.session_state.wizard_idx = max(0, idx-1)
-                        st.rerun()
-                    if siguiente:
+
+                    if revisar:
+                        errores = []
+
+                        if dias_sin_opciones:
+                            errores.append(
+                                "No hay opciones reservables en: " +
+                                ", ".join(date.fromisoformat(d).strftime("%d/%m") for d in dias_sin_opciones)
+                            )
+
                         if es_alemsi:
-                            if not elecciones_dia:
-                                st.error("Selecciona al menos una ración para este día. Sin selección no se genera producción.")
-                            else:
-                                st.session_state.pedidos[f_iso] = elecciones_dia
-                                if idx < len(dias)-1:
-                                    st.session_state.wizard_idx = idx+1
-                                else:
-                                    st.session_state.reserva_revisar = True
-                                st.rerun()
+                            dias_sin_consumo = [
+                                d for d in dias if not elecciones_periodo.get(d)
+                            ]
+                            if dias_sin_consumo:
+                                errores.append(
+                                    "Debes seleccionar al menos una ración en: " +
+                                    ", ".join(
+                                        date.fromisoformat(d).strftime("%d/%m")
+                                        for d in dias_sin_consumo
+                                    )
+                                )
                         else:
-                            faltan_decidir=[s for s in servicios_visibles if decisiones_dia.get(s)=="— Selecciona —"]
-                            consume_sin_plato=[s for s in servicios_visibles if decisiones_dia.get(s)=="Consumiré" and s not in elecciones_dia]
-                            if faltan_decidir:
-                                st.error("Debes indicar Consumiré o No consumiré en: " + ", ".join(faltan_decidir) + ".")
-                            elif consume_sin_plato:
-                                st.error("Selecciona un plato para: " + ", ".join(consume_sin_plato) + ".")
-                            elif not elecciones_dia:
-                                st.error("Si seleccionas este día debes reservar al menos un plato. Si no consumirás ningún servicio, quita el día de la selección.")
-                            else:
-                                st.session_state.pedidos[f_iso] = elecciones_dia
-                                if idx < len(dias)-1:
-                                    st.session_state.wizard_idx = idx+1
-                                else:
-                                    dias_sin = [d for d in dias if not st.session_state.pedidos.get(d)]
-                                    if dias_sin:
-                                        st.error("Faltan selecciones en: " + ", ".join(date.fromisoformat(d).strftime('%d/%m') for d in dias_sin))
-                                    else:
-                                        st.session_state.reserva_revisar = True
-                                st.rerun()
+                            for f_iso in dias:
+                                decisiones = decisiones_periodo.get(f_iso, {})
+                                elecciones = elecciones_periodo.get(f_iso, {})
+                                faltan_decidir = [
+                                    s for s, decision in decisiones.items()
+                                    if decision == "— Selecciona —"
+                                ]
+                                consume_sin_plato = [
+                                    s for s, decision in decisiones.items()
+                                    if decision == "Consumiré" and s not in elecciones
+                                ]
+                                if faltan_decidir:
+                                    errores.append(
+                                        f"{date.fromisoformat(f_iso).strftime('%d/%m')}: "
+                                        "indica Consumiré o No consumiré en " +
+                                        ", ".join(faltan_decidir)
+                                    )
+                                if consume_sin_plato:
+                                    errores.append(
+                                        f"{date.fromisoformat(f_iso).strftime('%d/%m')}: "
+                                        "selecciona plato para " +
+                                        ", ".join(consume_sin_plato)
+                                    )
+                                if not elecciones:
+                                    errores.append(
+                                        f"{date.fromisoformat(f_iso).strftime('%d/%m')}: "
+                                        "debes seleccionar al menos un plato."
+                                    )
+
+                        if errores:
+                            for error in errores:
+                                st.error(error)
+                        else:
+                            st.session_state.pedidos = elecciones_periodo
+                            st.session_state.reserva_revisar = True
+                            st.session_state.wizard_idx = 0
+                            st.rerun()
                 else:
                     st.markdown("#### ✅ Paso 3: Revisa y confirma")
                     detalle = []
