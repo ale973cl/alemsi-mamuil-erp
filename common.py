@@ -22,6 +22,7 @@ EMAILS = {
     "reclamos": ["ale973@gmail.com", "araucaniashop@gmail.com"],
 }
 PRECIO_DIA_DEFAULT = 6400
+SCHEMA_VERSION = "2026-08-20-circuitos-funcionales-v2"
 
 MINUTA = {
     "Lunes": {"Desayuno": ["Desayuno americano", "Té + pan con huevo", "Avena + fruta"], "Almuerzo": ["Carbonada", "Lentejas con arroz", "Pollo asado con puré"], "Once": ["Té + pan con palta", "Té + sándwich ave"], "Cena": ["Crema + sandwich", "Tallarines"]},
@@ -225,9 +226,20 @@ def fecha_hora_servicio(fecha_iso: str, servicio: str) -> datetime:
     hora = HORAS_SERVICIO.get(servicio, time(12, 0))
     return datetime.combine(date.fromisoformat(fecha_iso), hora)
 
-def reserva_modificable(fecha_iso: str, servicio: str, ahora: datetime | None = None) -> bool:
+def reserva_modificable(fecha_iso: str, servicio: str, ahora: datetime | None = None, anticipacion_horas: int = 48) -> bool:
     ahora = ahora or datetime.now()
-    return ahora <= fecha_hora_servicio(fecha_iso, servicio) - timedelta(hours=48)
+    return ahora <= fecha_hora_servicio(fecha_iso, servicio) - timedelta(hours=max(int(anticipacion_horas), 0))
+
+def max_dias_consecutivos(fechas) -> int:
+    """Mayor racha de fechas ISO, aunque la selección tenga intervalos."""
+    dias=sorted({date.fromisoformat(str(f)) for f in fechas})
+    mayor=racha=0
+    anterior=None
+    for dia in dias:
+        racha=racha+1 if anterior and dia==anterior+timedelta(days=1) else 1
+        mayor=max(mayor,racha)
+        anterior=dia
+    return mayor
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_instituciones():
@@ -345,8 +357,21 @@ def es_personal_alemsi(rol):
     return str(rol or "").strip() in {"Cocina", "Finanzas", "Bodega", "Gerencia", "AdminCasino", "AdminTotal", "Operaciones"}
 
 def init_db():
-    """Inicialización PostgreSQL con %s y tabla solicitudes nativa con plato_reservado, metodo_pago, estado_pago DEFAULT 'Pendiente'"""
+    """Aplica el esquema una sola vez por versión.
+
+    Si falta la tabla o la marca de migración se conserva el inicializador
+    idempotente completo como recuperación para instalaciones incompletas.
+    """
     conn = get_conn()
+    try:
+        aplicada = conn.query(
+            "SELECT 1 FROM migraciones_app WHERE clave=:clave LIMIT 1",
+            params={"clave": SCHEMA_VERSION}, ttl=0,
+        )
+        if not aplicada.empty:
+            return False
+    except Exception:
+        pass
     try:
         with conn.session as s:
             # Usuarios
@@ -708,6 +733,55 @@ def init_db():
                     estado TEXT DEFAULT 'Pendiente'
                 )
             """)
+            # Estructuras de minuta: se migran aquí, nunca durante la navegación.
+            execute_sql(s, """CREATE TABLE IF NOT EXISTS minuta_documentos (
+                id SERIAL PRIMARY KEY, nombre_archivo TEXT NOT NULL,
+                mime_type TEXT DEFAULT 'application/pdf', contenido BYTEA,
+                sha256 TEXT, fecha_desde TEXT, fecha_hasta TEXT,
+                cargado_por TEXT, cargado_at TEXT, estado TEXT DEFAULT 'FUENTE',
+                observacion TEXT
+            )""")
+            execute_sql(s, """CREATE TABLE IF NOT EXISTS minuta_observaciones_gerencia (
+                id SERIAL PRIMARY KEY, fecha_desde TEXT NOT NULL,
+                fecha_hasta TEXT NOT NULL, observacion TEXT NOT NULL,
+                usuario TEXT, fecha_accion TEXT, estado TEXT DEFAULT 'ABIERTA'
+            )""")
+            execute_sql(s, """CREATE TABLE IF NOT EXISTS minuta_flujo_coordinacion (
+                id SERIAL PRIMARY KEY, fecha_desde TEXT NOT NULL,
+                fecha_hasta TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
+                estado TEXT NOT NULL DEFAULT 'EN_REVISION', observacion TEXT,
+                enviado_por TEXT, enviado_at TEXT, coordinador TEXT,
+                coordinacion_at TEXT, activo INTEGER DEFAULT 1
+            )""")
+            execute_sql(s, """CREATE TABLE IF NOT EXISTS notificaciones_internas (
+                id SERIAL PRIMARY KEY, evento TEXT NOT NULL, rol_destino TEXT NOT NULL,
+                usuario_destino TEXT, titulo TEXT NOT NULL, mensaje TEXT,
+                entidad TEXT, entidad_id TEXT, creado_por TEXT, creado_at TEXT,
+                leido_at TEXT, estado TEXT DEFAULT 'PENDIENTE'
+            )""")
+            execute_sql(s, """CREATE TABLE IF NOT EXISTS correo_outbox (
+                id SERIAL PRIMARY KEY, evento TEXT NOT NULL, destino TEXT NOT NULL,
+                asunto TEXT NOT NULL, cuerpo_html TEXT, entidad TEXT, entidad_id TEXT,
+                estado TEXT DEFAULT 'PENDIENTE', intentos INTEGER DEFAULT 0,
+                creado_at TEXT, ultimo_intento_at TEXT, enviado_at TEXT, error TEXT
+            )""")
+            execute_sql(s, """CREATE TABLE IF NOT EXISTS opiniones_experiencia (
+                id SERIAL PRIMARY KEY, tipo TEXT NOT NULL, fecha TEXT NOT NULL,
+                identificacion TEXT, servicio TEXT, comentario TEXT NOT NULL,
+                evidencia_nombre TEXT, evidencia BYTEA, responsable TEXT,
+                estado TEXT NOT NULL, resolucion TEXT, creado_por TEXT,
+                creado_at TEXT, cerrado_por TEXT, cerrado_at TEXT
+            )""")
+            execute_sql(s, """CREATE TABLE IF NOT EXISTS configuracion_operativa (
+                clave TEXT PRIMARY KEY, valor INTEGER NOT NULL, descripcion TEXT,
+                actualizado_por TEXT, actualizado_at TEXT
+            )""")
+            execute_sql(s, """CREATE TABLE IF NOT EXISTS solicitudes_excepcion_cancelacion (
+                id SERIAL PRIMARY KEY, referencia_reserva TEXT NOT NULL, rut TEXT NOT NULL,
+                fecha TEXT NOT NULL, servicio TEXT NOT NULL, motivo TEXT NOT NULL,
+                estado TEXT DEFAULT 'PENDIENTE', solicitado_at TEXT, resuelto_por TEXT,
+                resuelto_at TEXT, resolucion TEXT, impacto_economico INTEGER DEFAULT 0
+            )""")
             # Migraciones idempotentes para instalaciones existentes
             for column_sql in [
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS plato_reservado TEXT",
@@ -724,6 +798,7 @@ def init_db():
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS modificado_por TEXT",
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS referencia_reserva TEXT",
                 "ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS estado_reserva TEXT DEFAULT 'ACTIVA'",
+                "ALTER TABLE minuta_revision_coordinacion ADD COLUMN IF NOT EXISTS flujo_id INTEGER",
                 "ALTER TABLE minutas ADD COLUMN IF NOT EXISTS fecha TEXT",
                 "ALTER TABLE minutas ADD COLUMN IF NOT EXISTS tipo_opcion TEXT",
                 "ALTER TABLE minutas ADD COLUMN IF NOT EXISTS estado TEXT DEFAULT 'PUBLICABLE'",
@@ -744,6 +819,17 @@ def init_db():
                 "ALTER TABLE platos ADD COLUMN IF NOT EXISTS temporada TEXT",
             ]:
                 execute_sql(s, column_sql)
+            execute_sql(s, """CREATE UNIQUE INDEX IF NOT EXISTS ux_revision_coord_item
+                ON minuta_revision_coordinacion(flujo_id,fecha,servicio,tipo_opcion)
+                WHERE flujo_id IS NOT NULL""")
+            execute_sql(s, "CREATE INDEX IF NOT EXISTS idx_notificaciones_rol_estado ON notificaciones_internas(rol_destino,estado,creado_at)")
+            execute_sql(s, "CREATE INDEX IF NOT EXISTS idx_outbox_estado ON correo_outbox(estado,creado_at)")
+            for clave,valor,descripcion in [
+                ('reserva_anticipacion_horas',48,'Anticipación mínima para reservar'),
+                ('cancelacion_anticipacion_horas',48,'Anticipación mínima para cancelar'),
+                ('reserva_max_dias_consecutivos',7,'Máximo de días consecutivos'),
+            ]:
+                execute_sql(s,"INSERT INTO configuracion_operativa (clave,valor,descripcion) VALUES (%s,%s,%s) ON CONFLICT (clave) DO NOTHING",(clave,valor,descripcion))
 
             # v40: conserva históricos y neutraliza duplicados heredados antes de crear la invariante.
             execute_sql(s, """
@@ -949,7 +1035,15 @@ def init_db():
             ]:
                 execute_sql(s, index_sql)
 
+            execute_sql(
+                s,
+                "INSERT INTO migraciones_app (clave,aplicado_at) VALUES (%s,%s) "
+                "ON CONFLICT (clave) DO UPDATE SET aplicado_at=EXCLUDED.aplicado_at",
+                (SCHEMA_VERSION, datetime.now().isoformat()),
+            )
+
             s.commit()
+            return True
     except Exception as e:
         # Fallback para conexiones que no usan session context
         try:

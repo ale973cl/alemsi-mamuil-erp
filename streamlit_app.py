@@ -17,7 +17,8 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
-from common import init_db, get_conn, hash_pwd, normalizar_rut, normalizar_rut_db, limpiar_rut, validar_rut_m11, apply_alemsi_style, MINUTA, get_precio, gen_codigo, descontar_bodega, formato_clp, enviar_email, EMAILS, get_instituciones, get_precio_institucion, get_precio_persona_institucion, PRECIO_DIA_DEFAULT, execute_sql, get_minutas_rango, get_correos, limpiar_cache_correos, gen_referencia_reserva, reserva_modificable, normalizar_correo, validar_correo_estructura, dominio_correo_resuelve, normalizar_telefono_chile, telefono_movil_chile_valido
+from workflow_service import crear_envio_minuta, crear_notificacion, guardar_revision_item, finalizar_revision, procesar_correo, registrar_opinion, solicitar_excepcion_cancelacion, resolver_excepcion_cancelacion
+from common import init_db, get_conn, hash_pwd, normalizar_rut, normalizar_rut_db, limpiar_rut, validar_rut_m11, apply_alemsi_style, MINUTA, get_precio, gen_codigo, descontar_bodega, formato_clp, enviar_email, EMAILS, get_instituciones, get_precio_institucion, get_precio_persona_institucion, PRECIO_DIA_DEFAULT, execute_sql, get_minutas_rango, get_correos, limpiar_cache_correos, gen_referencia_reserva, reserva_modificable, max_dias_consecutivos, normalizar_correo, validar_correo_estructura, dominio_correo_resuelve, normalizar_telefono_chile, telefono_movil_chile_valido
 
 # ================================================================
 # ANCLA DE CAMBIO SEGURO
@@ -227,7 +228,7 @@ def generar_pdf_reserva(nombre, rut, institucion, referencia, detalle, precio_di
     titulo=ParagraphStyle('titulo',parent=styles['Heading1'],textColor=colors.HexColor('#0A2F6B'),alignment=TA_CENTER,fontSize=18,spaceAfter=8)
     normal=styles['BodyText']
     story=[Paragraph('ALEMSI · CASINO MAMUIL',titulo),Paragraph('DETALLE DE RESERVA',titulo)]
-    info=[[Paragraph('<b>Referencia</b>',normal),referencia,Paragraph('<b>Comensal</b>',normal),nombre],[Paragraph('<b>RUT</b>',normal),rut,Paragraph('<b>Institución</b>',normal),institucion]]
+    info=[[Paragraph('<b>Código de reserva</b>',normal),referencia,Paragraph('<b>Comensal</b>',normal),nombre],[Paragraph('<b>RUT</b>',normal),rut,Paragraph('<b>Institución</b>',normal),institucion]]
     t=Table(info,colWidths=[28*mm,55*mm,28*mm,55*mm]); t.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.6,colors.HexColor('#B7C7BD')),('BACKGROUND',(0,0),(0,-1),colors.HexColor('#F1F6F3')),('BACKGROUND',(2,0),(2,-1),colors.HexColor('#F1F6F3')),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('PADDING',(0,0),(-1,-1),6)])); story += [t,Spacer(1,7*mm)]
     for fecha_iso in sorted({x[0] for x in detalle}):
         f=date.fromisoformat(fecha_iso); dia=["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"][f.weekday()]
@@ -428,10 +429,10 @@ PERMISOS_DISPONIBLES = {
 }
 
 def _render_encuestas_portal(conn, token, referencia, rut, institucion):
-    """ENC-01: una misma ventana, Casino primero y APP debajo."""
+    """Encuesta operacional limitada a los tres criterios aprobados."""
     st.divider()
     st.markdown("## ⭐ Tu opinión nos ayuda a mejorar")
-    st.caption("Gracias por utilizar Mamuil Malal. Las evaluaciones de Casino y APP se guardan por separado.")
+    st.caption("Evalúa Atención, Calidad de la comida y Limpieza.")
 
     existente_casino = conn.query(
         "SELECT id FROM encuestas_satisfaccion WHERE pago_token=:t AND tipo='CASINO' LIMIT 1",
@@ -443,39 +444,21 @@ def _render_encuestas_portal(conn, token, referencia, rut, institucion):
         st.success("Gracias. Tu evaluación del Casino ya fue registrada.")
     else:
         with st.form(f"enc_casino_{referencia}"):
-            general = st.select_slider("Satisfacción general", options=[1,2,3,4,5], value=5, format_func=lambda x: "⭐"*x)
             comida = st.select_slider("Calidad de la comida", options=[1,2,3,4,5], value=5, format_func=lambda x: "⭐"*x)
             atencion = st.select_slider("Atención", options=[1,2,3,4,5], value=5, format_func=lambda x: "⭐"*x)
             limpieza = st.select_slider("Limpieza", options=[1,2,3,4,5], value=5, format_func=lambda x: "⭐"*x)
-            variedad = st.select_slider("Variedad", options=[1,2,3,4,5], value=5, format_func=lambda x: "⭐"*x)
             comentario = st.text_area("Comentario (opcional)", key=f"coment_casino_{referencia}")
             if st.form_submit_button("Enviar evaluación del Casino", type="primary", use_container_width=True):
                 with conn.session as ses:
-                    execute_sql(ses, "INSERT INTO encuestas_satisfaccion (tipo,pago_token,referencia_reserva,rut,institucion,puntaje_general,puntaje_comida,puntaje_atencion,puntaje_limpieza,puntaje_variedad,comentario,fecha_respuesta) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", ("CASINO",token,referencia,rut,institucion,int(general),int(comida),int(atencion),int(limpieza),int(variedad),comentario.strip(),datetime.now().isoformat()))
+                    promedio = round((int(comida)+int(atencion)+int(limpieza))/3)
+                    execute_sql(ses, "INSERT INTO encuestas_satisfaccion (tipo,pago_token,referencia_reserva,rut,institucion,puntaje_general,puntaje_comida,puntaje_atencion,puntaje_limpieza,comentario,fecha_respuesta) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", ("CASINO",token,referencia,rut,institucion,promedio,int(comida),int(atencion),int(limpieza),comentario.strip(),datetime.now().isoformat()))
+                    if comentario.strip():
+                        crear_notificacion(ses,evento='COMENTARIO_ENCUESTA',rol_destino='Cocina',titulo='Comentario de encuesta recibido',mensaje=comentario.strip(),entidad='encuestas_satisfaccion',entidad_id=referencia,usuario=rut)
                     ses.commit()
                 st.success("Gracias por evaluar el servicio de Casino Mamuil Malal.")
                 st.rerun()
 
-    st.markdown("### 📱 Califica la APP ALEMSI")
-    st.caption("Evaluación independiente de la interfaz y facilidad de uso de la aplicación.")
-    existente_app = conn.query(
-        "SELECT id FROM encuestas_satisfaccion WHERE pago_token=:t AND tipo='APP' LIMIT 1",
-        params={"t":token}, ttl=0
-    )
-    if not existente_app.empty:
-        st.success("Gracias. Tu evaluación de la APP ya fue registrada.")
-    else:
-        with st.form(f"enc_app_{referencia}"):
-            general_app = st.select_slider("Experiencia general con la APP", options=[1,2,3,4,5], value=5, format_func=lambda x: "⭐"*x)
-            facilidad = st.select_slider("Facilidad de uso", options=[1,2,3,4,5], value=5, format_func=lambda x: "⭐"*x)
-            claridad = st.select_slider("Claridad de la información", options=[1,2,3,4,5], value=5, format_func=lambda x: "⭐"*x)
-            comentario_app = st.text_area("Comentario sobre la APP (opcional)", key=f"coment_app_{referencia}")
-            if st.form_submit_button("Enviar evaluación de la APP", use_container_width=True):
-                with conn.session as ses:
-                    execute_sql(ses, "INSERT INTO encuestas_satisfaccion (tipo,pago_token,referencia_reserva,rut,institucion,puntaje_general,puntaje_facilidad,puntaje_claridad,comentario,fecha_respuesta) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", ("APP",token,referencia,rut,institucion,int(general_app),int(facilidad),int(claridad),comentario_app.strip(),datetime.now().isoformat()))
-                    ses.commit()
-                st.success("Gracias por ayudarnos a mejorar la APP ALEMSI.")
-                st.rerun()
+    st.caption("La evaluación se limita a Atención, Calidad de la comida y Limpieza.")
 
 
 def _render_satisfaccion_gestion(usuario, key_prefix="sat"):
@@ -512,10 +495,18 @@ def _render_satisfaccion_gestion(usuario, key_prefix="sat"):
                 with st.expander(f"💬 Comentarios de encuestas · {len(comentarios)}"):
                     st.dataframe(_tabla_visible(comentarios,{"fecha_respuesta":"Fecha / hora","tipo":"Tipo","institucion":"Institución","puntaje_general":"Puntaje","comentario":"Comentario"},["fecha_respuesta"]),use_container_width=True,hide_index=True)
     if permiso_habilitado(usuario.get("username"),"ver_reclamos",False) or usuario.get("rol")=="AdminTotal":
-        rec=conn.query("SELECT fecha,nombre,tipo,categoria,mensaje,estado FROM reclamos_sugerencias ORDER BY fecha DESC",ttl=0)
-        st.markdown("#### 🗣️ Reclamos, sugerencias y felicitaciones")
-        if rec.empty: st.caption("Sin registros.")
-        else: st.dataframe(_tabla_visible(rec,{"fecha":"Fecha / hora","nombre":"Comensal","tipo":"Tipo","categoria":"Categoría","mensaje":"Mensaje","estado":"Estado"},["fecha"]),use_container_width=True,hide_index=True)
+        rec=conn.query("SELECT fecha,identificacion,tipo,servicio,comentario,responsable,estado,resolucion FROM opiniones_experiencia ORDER BY creado_at DESC",ttl=30)
+        st.markdown("#### 🗣️ Opiniones y experiencia")
+        if rec.empty:
+            st.caption("Sin registros.")
+        else:
+            f_tipo=st.selectbox("Tipo",["Todos"]+sorted(rec["tipo"].dropna().astype(str).unique().tolist()),key=f"{key_prefix}_op_tipo")
+            f_serv=st.selectbox("Servicio",["Todos"]+sorted(rec["servicio"].dropna().astype(str).unique().tolist()),key=f"{key_prefix}_op_serv")
+            f_estado=st.selectbox("Estado",["Todos"]+sorted(rec["estado"].dropna().astype(str).unique().tolist()),key=f"{key_prefix}_op_estado")
+            vista_rec=rec.copy()
+            for columna,valor in [("tipo",f_tipo),("servicio",f_serv),("estado",f_estado)]:
+                if valor!="Todos": vista_rec=vista_rec[vista_rec[columna].astype(str)==valor]
+            st.dataframe(_tabla_visible(vista_rec,{"fecha":"Fecha","identificacion":"Identificación","tipo":"Tipo","servicio":"Servicio / contexto","comentario":"Comentario","responsable":"Responsable","estado":"Estado","resolucion":"Resolución"},["fecha"]),use_container_width=True,hide_index=True)
 
 
 st.set_page_config(page_title="Mamuil Malal · Reserva de Alimentación", page_icon="🍽️", layout="wide", initial_sidebar_state="collapsed")
@@ -592,15 +583,16 @@ if token_q:
                     token_q,
                 ),
             )
+            destinos_fin=get_correos("finanzas")
+            _,correo_outbox=crear_notificacion(ses,evento='COMPROBANTE_CARGADO',rol_destino='Finanzas',
+                titulo='Nuevo comprobante pendiente',mensaje=f'Código de reserva {ref}.',
+                entidad='comprobantes_pago',entidad_id=ref,usuario=str(df_token.iloc[0]['rut']),
+                email_destino=destinos_fin[0] if destinos_fin else '')
             ses.commit()
 
-        for destino in get_correos("finanzas"):
-            enviar_email(
-                destino,
-                f"[COMPROBANTE RECIBIDO] {ref}",
-                f"<p>Se recibió un comprobante para la reserva <b>{ref}</b>. "
-                "Debe ser revisado y validado por Finanzas.</p>",
-            )
+        if correo_outbox:
+            with conn.session as ses_mail:
+                procesar_correo(ses_mail,correo_outbox,enviar_email); ses_mail.commit()
 
         if ok_drive:
             st.success("Comprobante recibido y almacenado en Google Drive. Finanzas realizará la validación.")
@@ -774,7 +766,20 @@ def _excepcion_reserva_activa(rut, fecha_iso):
         return False
 
 def _reserva_modificable_v40(rut, fecha_iso, servicio):
-    return reserva_modificable(fecha_iso, servicio) or _excepcion_reserva_activa(rut, fecha_iso)
+    try:
+        cfg=get_conn().query("SELECT valor FROM configuracion_operativa WHERE clave='reserva_anticipacion_horas'",ttl=30)
+        horas=int(cfg.iloc[0]["valor"]) if not cfg.empty else 48
+    except Exception:
+        horas=48
+    return reserva_modificable(fecha_iso, servicio, anticipacion_horas=horas) or _excepcion_reserva_activa(rut, fecha_iso)
+
+def _cancelacion_modificable(rut, fecha_iso, servicio):
+    try:
+        cfg=get_conn().query("SELECT valor FROM configuracion_operativa WHERE clave='cancelacion_anticipacion_horas'",ttl=30)
+        horas=int(cfg.iloc[0]["valor"]) if not cfg.empty else 48
+    except Exception:
+        horas=48
+    return reserva_modificable(fecha_iso, servicio, anticipacion_horas=horas) or _excepcion_reserva_activa(rut, fecha_iso)
 
 def _scroll_top():
     """Evita que widgets inferiores conserven foco/scroll al cambiar de módulo."""
@@ -1752,7 +1757,7 @@ def render_comensal():
                 else:
                     st.warning(resultado_anterior["mensaje"])
                 if resultado_anterior.get("referencia"):
-                    st.info(f"Referencia de consulta: {resultado_anterior['referencia']}")
+                    st.info(f"Código de reserva: {resultado_anterior['referencia']}")
                 st.markdown("#### Reserva finalizada")
                 st.caption("Para terminar este flujo y volver al inicio, utiliza Finalizar.")
                 if st.button("✅ Finalizar", type="primary", use_container_width=True, key="cerrar_post_confirmacion"):
@@ -1914,8 +1919,15 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                 )
 
                 if continuar:
+                    try:
+                        cfg_max=conn.query("SELECT valor FROM configuracion_operativa WHERE clave='reserva_max_dias_consecutivos'",ttl=30)
+                        max_dias=int(cfg_max.iloc[0]["valor"]) if not cfg_max.empty else 7
+                    except Exception:
+                        max_dias=7
                     if not seleccion:
                         st.error("Selecciona al menos una fecha disponible para continuar.")
+                    elif max_dias_consecutivos(seleccion)>max_dias:
+                        st.error(f"Puedes reservar como máximo {max_dias} días consecutivos.")
                     else:
                         st.session_state.dias_sel = seleccion
                         st.session_state.pedidos = {dia: {} for dia in seleccion}
@@ -2267,7 +2279,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="prim
                                     <div><b>N° de cuenta:</b><br><span style='font-family:monospace'>{banco_cfg.get('numero_cuenta','')}</span></div>
                                     <div><b>Correo:</b><br><span style='font-family:monospace'>{banco_cfg.get('correo_comprobantes','')}</span></div>
                                     <div><b>Monto:</b><br><span style='font-family:monospace'>{formato_clp(total_real)}</span></div>
-                                    <div><b>Referencia:</b><br><span style='font-family:monospace'>{referencia_reserva}</span></div>
+                                    <div><b>Código de reserva:</b><br><span style='font-family:monospace'>{referencia_reserva}</span></div>
                                   </div>
                                   <div style='margin-top:12px;padding:10px;background:#fff;border:1px dashed #b9d2ca;border-radius:8px;font-family:monospace;white-space:pre-line'>Titular: {banco_cfg.get('titular','')}
 RUT: {banco_cfg.get('rut','')}
@@ -2276,7 +2288,7 @@ Tipo: {banco_cfg.get('tipo_cuenta','')}
 Cuenta: {banco_cfg.get('numero_cuenta','')}
 Correo: {banco_cfg.get('correo_comprobantes','')}
 Monto: {formato_clp(total_real)}
-Referencia: {referencia_reserva}</div>
+Código de reserva: {referencia_reserva}</div>
                                 </div>
                                 """
                             else:
@@ -2285,7 +2297,7 @@ Referencia: {referencia_reserva}</div>
                             <div style="font-family:Arial,sans-serif;padding:24px;border:2px solid #0A2F6B;border-radius:16px;max-width:760px">
                               <div style="background:#0A2F6B;padding:20px;border-radius:12px;color:white;text-align:center"><h1 style="margin:0;color:white">🍽️ Mamuil Malal</h1><p>Comprobante de reserva</p></div>
                               <h2 style="color:#0A2F6B">Hola {nombre}</h2>
-                              <p style="font-size:18px"><b>Referencia:</b> {referencia_reserva}</p>
+                              <p style="font-size:18px"><b>Código de reserva:</b> {referencia_reserva}</p>
                               <p><b>RUT:</b> {rut} · <b>Institución:</b> {institucion}</p>
                               <p><b>Fecha de emisión:</b> {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
                               <p><b>Días:</b> {len(dias)} · <b>Valor total de la reserva:</b> {formato_clp(total_real)}</p>
@@ -2293,14 +2305,14 @@ Referencia: {referencia_reserva}</div>
                               {bloque_banco}
                               <p><b>Fechas:</b> {resumen_fechas}</p>
                               <h3 style="color:#0A2F6B">Detalle de reserva</h3>{detalle_html}
-                              <div style="background:#F1F6F3;padding:14px;border-radius:10px;margin-top:14px"><b>Sube tu comprobante aquí</b>{bloque_link}<span style="font-size:13px">El pago no es obligatorio antes del consumo. Puedes utilizar este mismo enlace cuando corresponda.</span><p style="margin-bottom:0"><b>Gracias por utilizar nuestra aplicación.</b> Después de cargar tu comprobante, esta misma ventana se actualizará para que puedas calificar primero el servicio de Casino Mamuil Malal y, debajo, la APP ALEMSI.</p></div>
+                              <div style="background:#F1F6F3;padding:14px;border-radius:10px;margin-top:14px"><b>Sube tu comprobante aquí</b>{bloque_link}<span style="font-size:13px">El pago no es obligatorio antes del consumo. Puedes utilizar este mismo enlace cuando corresponda.</span><p style="margin-bottom:0"><b>Gracias por utilizar nuestra aplicación.</b> Después de cargar tu comprobante, esta misma ventana se actualizará para que puedas evaluar Atención, Calidad de la comida y Limpieza.</p></div>
                             </div>"""
                             adjuntos=[(f"Reserva_{referencia_reserva}.pdf",pdf_reserva,"pdf")]
                             correo_ok, correo_msg = enviar_email(correo_cli, f"Reserva {referencia_reserva} · Mamuil Malal", html_comprobante, adjuntos=adjuntos)
                             # MAIL-02: al confirmar se notifica solo al comensal.
                             # Cocina recibirá posteriormente un resumen consolidado de producción,
                             # evitando un correo individual por cada reserva.
-                            mensaje_resultado = f"¡Felicitaciones! Tu reserva fue realizada con éxito. Te esperamos. Comprobante enviado a {correo_cli}." if correo_ok else f"Tu reserva fue realizada con éxito, referencia {referencia_reserva}, pero el comprobante no pudo enviarse: {correo_msg}"
+                            mensaje_resultado = f"¡Felicitaciones! Tu reserva fue realizada con éxito. Te esperamos. Comprobante enviado a {correo_cli}." if correo_ok else f"Tu reserva fue realizada con éxito, código de reserva {referencia_reserva}, pero el comprobante no pudo enviarse: {correo_msg}"
                             ok_resultado = correo_ok
 
                         st.session_state.dias_sel = []
@@ -2323,17 +2335,31 @@ Referencia: {referencia_reserva}</div>
             if df_mis.empty:
                 st.info("No tienes reservas activas registradas.")
             else:
-                st.dataframe(_tabla_visible(df_mis,{"referencia_reserva":"Referencia","desde":"Desde","hasta":"Hasta","servicios":"Servicios","estado_pago":"Estado pago"},["desde","hasta"]),use_container_width=True,hide_index=True)
+                st.dataframe(_tabla_visible(df_mis,{"referencia_reserva":"Código de reserva","desde":"Desde","hasta":"Hasta","servicios":"Servicios","estado_pago":"Estado pago"},["desde","hasta"]),use_container_width=True,hide_index=True)
                 ref_cancel = selector_neutro("Reserva a cancelar", df_mis["referencia_reserva"].astype(str).tolist(), key="comensal_cancel_ref")
                 if ref_cancel:
                     lineas_cancel = conn.query("SELECT id,fecha,servicio,plato_reservado FROM solicitudes WHERE rut=:rut AND referencia_reserva=:ref AND COALESCE(estado_reserva,'ACTIVA')='ACTIVA' ORDER BY fecha,servicio",params={"rut":rut,"ref":ref_cancel},ttl=0)
                     st.dataframe(_tabla_visible(lineas_cancel,{"fecha":"Fecha","servicio":"Servicio","plato_reservado":"Plato"},["fecha"]),use_container_width=True,hide_index=True)
                     bloqueadas=[]
                     for _,lr in lineas_cancel.iterrows():
-                        if not _reserva_modificable_v40(rut,str(lr["fecha"]),str(lr["servicio"])):
+                        if not _cancelacion_modificable(rut,str(lr["fecha"]),str(lr["servicio"])):
                             bloqueadas.append(f"{fecha_visible(lr['fecha'])} · {lr['servicio']}")
                     if bloqueadas:
-                        st.warning("No se puede cancelar esta reserva porque contiene servicios fuera de la ventana permitida: " + ", ".join(bloqueadas))
+                        st.warning("No se puede cancelar por la ventana normal. Puedes solicitar una excepción por caso fortuito o fuerza mayor.")
+                        ids_linea=lineas_cancel["id"].astype(int).tolist()
+                        linea_exc=selector_neutro("Servicio para la excepción",ids_linea,key=f"exc_linea_{ref_cancel}",format_func=lambda x: f"{fecha_visible(lineas_cancel[lineas_cancel['id'].astype(int)==int(x)].iloc[0]['fecha'])} · {lineas_cancel[lineas_cancel['id'].astype(int)==int(x)].iloc[0]['servicio']}")
+                        motivo_exc=st.text_area("Motivo de fuerza mayor*",key=f"exc_motivo_{ref_cancel}")
+                        if st.button("Solicitar excepción",key=f"exc_solicitar_{ref_cancel}",disabled=linea_exc is None):
+                            fila_exc=lineas_cancel[lineas_cancel["id"].astype(int)==int(linea_exc)].iloc[0]
+                            try:
+                                with conn.session as ses_exc:
+                                    solicitar_excepcion_cancelacion(ses_exc,referencia=ref_cancel,rut=rut,
+                                        fecha=str(fila_exc["fecha"]),servicio=str(fila_exc["servicio"]),
+                                        motivo=motivo_exc,usuario=rut)
+                                    ses_exc.commit()
+                                st.success("Solicitud enviada a Administración Casino con trazabilidad.")
+                            except ValueError as exc:
+                                st.error(str(exc))
                     else:
                         confirmar_cancel=st.checkbox("Confirmo que deseo cancelar esta reserva",key=f"cancel_ok_{ref_cancel}")
                         if st.button("Cancelar reserva",type="primary",use_container_width=True,disabled=not confirmar_cancel,key=f"cancel_btn_{ref_cancel}"):
@@ -2346,35 +2372,23 @@ Referencia: {referencia_reserva}</div>
                             st.rerun()
 
         with tab_reclamos:
-            with st.form("reclamo"):
-                tipo=st.selectbox("Tipo", ["Reclamo","Sugerencia","Felicitación"])
-                categoria=st.selectbox("Categoría", ["Comida","Atención","Higiene","Infraestructura","Otro"])
-                mensaje=st.text_area("Mensaje*")
-                if st.form_submit_button("Enviar", type="primary", use_container_width=True):
-                    if mensaje:
-                        conn=get_conn()
-                        fecha_envio = datetime.now()
-                        with conn.session as s:
-                            execute_sql(s, "INSERT INTO reclamos_sugerencias (rut,nombre,tipo,categoria,mensaje,fecha,estado) VALUES (%s,%s,%s,%s,%s,%s,%s)", (rut,nombre,tipo,categoria,mensaje, fecha_envio.isoformat(),"Pendiente"))
-                            s.commit()
-                        html_reclamo = f"""
-                        <div style="font-family:Arial,sans-serif;max-width:680px;padding:20px;border:1px solid #ddd;border-radius:12px">
-                          <h2 style="color:#0A2F6B">{tipo} recibido - Mamuil Malal</h2>
-                          <p><b>Fecha:</b> {fecha_envio.strftime('%d/%m/%Y %H:%M')}</p>
-                          <p><b>Comensal:</b> {nombre}</p><p><b>RUT:</b> {rut}</p>
-                          <p><b>Categoría:</b> {categoria}</p>
-                          <div style="background:#f7f7f7;padding:14px;border-radius:8px"><b>Mensaje:</b><br>{mensaje}</div>
-                        </div>
-                        """
-                        resultados = []
-                        for destino in get_correos("reclamos"):
-                            resultados.append(enviar_email(destino, f"[{tipo.upper()}] {categoria} - {nombre}", html_reclamo))
-                        enviados = sum(1 for ok, _ in resultados if ok)
-                        if enviados:
-                            st.success(f"Enviado y notificado por correo ({enviados} destinatario(s) demo).")
-                        else:
-                            detalle_error = resultados[0][1] if resultados else "Sin destinatarios configurados"
-                            st.warning(f"Guardado en el sistema, pero no se pudo enviar el correo: {detalle_error}")
+            st.markdown("### Opiniones y experiencia")
+            with st.form("opinion_experiencia"):
+                tipo=st.selectbox("Tipo*", ["Reclamo","Sugerencia","Felicitación"])
+                servicio=st.selectbox("Servicio / contexto*", ["Desayuno","Almuerzo","Once","Cena","Atención","Limpieza","Aplicación","Otro"])
+                mensaje=st.text_area("Comentario*")
+                enviar_opinion=st.form_submit_button("Enviar opinión", type="primary", use_container_width=True)
+            if enviar_opinion:
+                try:
+                    destinos=get_correos("reclamos")
+                    with conn.session as ses:
+                        opinion_id,estado=registrar_opinion(ses,tipo=tipo,fecha=date.today().isoformat(),
+                            identificacion=f"{nombre} · {rut}",servicio=servicio,comentario=mensaje,
+                            usuario=rut,email_destino=destinos[0] if destinos else "")
+                        ses.commit()
+                    st.success(f"Opinión registrada · {estado} · folio {opinion_id}.")
+                except ValueError as exc:
+                    st.error(str(exc))
     else:
         st.markdown("### Reserva de alimentación")
         rut_raw=st.text_input("RUT", placeholder="Ej.: 12.345.678-5")
@@ -2484,31 +2498,8 @@ def _render_platos_tres_columnas(df, plato_col="plato", valor_col="porciones"):
 
 
 def _asegurar_documentos_minuta_y_gerencia():
-    conn=get_conn()
-    with conn.session as ses:
-        execute_sql(ses, """CREATE TABLE IF NOT EXISTS minuta_documentos (
-            id SERIAL PRIMARY KEY,
-            nombre_archivo TEXT NOT NULL,
-            mime_type TEXT DEFAULT 'application/pdf',
-            contenido BYTEA,
-            sha256 TEXT,
-            fecha_desde TEXT,
-            fecha_hasta TEXT,
-            cargado_por TEXT,
-            cargado_at TEXT,
-            estado TEXT DEFAULT 'FUENTE',
-            observacion TEXT
-        )""")
-        execute_sql(ses, """CREATE TABLE IF NOT EXISTS minuta_observaciones_gerencia (
-            id SERIAL PRIMARY KEY,
-            fecha_desde TEXT NOT NULL,
-            fecha_hasta TEXT NOT NULL,
-            observacion TEXT NOT NULL,
-            usuario TEXT,
-            fecha_accion TEXT,
-            estado TEXT DEFAULT 'ABIERTA'
-        )""")
-        ses.commit()
+    """Compatibilidad: estas tablas se garantizan durante ``init_db``."""
+    return None
 
 def _extraer_texto_pdf_minuta(pdf_bytes):
     try:
@@ -2621,41 +2612,8 @@ def _observaciones_gerencia_rango(fecha_desde,fecha_hasta):
     )
 
 def _asegurar_revision_coordinacion():
-    """Estructura incremental: no altera la minuta oficial; guarda solo revisión/propuestas."""
-    conn = get_conn()
-    with conn.session as ses:
-        execute_sql(ses, """
-            CREATE TABLE IF NOT EXISTS minuta_revision_coordinacion (
-                id SERIAL PRIMARY KEY, fecha TEXT NOT NULL, servicio TEXT NOT NULL,
-                tipo_opcion TEXT NOT NULL, plato_actual TEXT, accion TEXT NOT NULL,
-                observacion TEXT, plato_propuesto TEXT, usuario TEXT,
-                fecha_accion TEXT, estado TEXT DEFAULT 'Pendiente'
-            )
-        """)
-        execute_sql(ses, """
-            CREATE TABLE IF NOT EXISTS receta_revision_coordinacion (
-                id SERIAL PRIMARY KEY, plato TEXT NOT NULL, version_receta INTEGER,
-                accion TEXT NOT NULL, observacion TEXT, usuario TEXT,
-                fecha_accion TEXT, estado TEXT DEFAULT 'Pendiente'
-            )
-        """)
-        execute_sql(ses, """
-            CREATE TABLE IF NOT EXISTS minuta_flujo_coordinacion (
-                id SERIAL PRIMARY KEY,
-                fecha_desde TEXT NOT NULL,
-                fecha_hasta TEXT NOT NULL,
-                version INTEGER NOT NULL DEFAULT 1,
-                estado TEXT NOT NULL DEFAULT 'EN_REVISION',
-                observacion TEXT,
-                enviado_por TEXT,
-                enviado_at TEXT,
-                coordinador TEXT,
-                coordinacion_at TEXT,
-                activo INTEGER DEFAULT 1
-            )
-        """)
-        ses.commit()
-
+    """Compatibilidad: el esquema de Coordinación se crea al iniciar/migrar."""
+    return None
 
 def _sincronizar_maestro_platos():
     """Agrega al maestro nombres históricos de minutas sin borrar ni cambiar costos existentes."""
@@ -2874,38 +2832,21 @@ def _enviar_minuta_coordinacion(fecha_desde, fecha_hasta, usuario):
     """Crea una nueva versión de revisión sin borrar ninguna anterior."""
     _asegurar_revision_coordinacion()
     conn = get_conn()
-    actual = _flujo_minuta_actual(fecha_desde, fecha_hasta)
-    version = 1
-    if not actual.empty:
-        version = int(actual.iloc[0].get("version") or 0) + 1
-    ahora = datetime.now().isoformat()
+    destinos_coord = _correos_rol_y_config('coordinacion','Coordinacion')
     with conn.session as ses:
-        execute_sql(
-            ses,
-            """
-            INSERT INTO minuta_flujo_coordinacion
-            (fecha_desde,fecha_hasta,version,estado,observacion,enviado_por,enviado_at,activo)
-            VALUES (%s,%s,%s,'EN_REVISION','',%s,%s,1)
-            """,
-            (str(fecha_desde), str(fecha_hasta), version, str(usuario), ahora)
-        )
+        _,version,correo_id=crear_envio_minuta(ses,fecha_desde=str(fecha_desde),
+            fecha_hasta=str(fecha_hasta),usuario=str(usuario),
+            coordinacion_email=destinos_coord[0] if destinos_coord else '')
         ses.commit()
     registrar_auditoria(
         usuario, "ENVIAR_MINUTA_COORDINACION", "minuta_flujo_coordinacion",
         f"{fecha_desde}..{fecha_hasta}", "", f"EN_REVISION v{version}",
         "Envío formal a Coordinación"
     )
-    asunto = f"[ALEMSI] Minuta disponible para revisión · v{version}"
-    html = f"""
-    <div style='font-family:Arial,sans-serif;max-width:680px;margin:auto;border:1px solid #d7e2dc;border-radius:14px;padding:22px'>
-      <h2 style='color:#0A2F6B'>Minuta disponible para revisión</h2>
-      <p>Administración Casino envió una propuesta de minuta a Coordinación.</p>
-      <p><b>Período:</b> {fecha_visible(fecha_desde)} → {fecha_visible(fecha_hasta)}<br>
-         <b>Versión:</b> {version}<br><b>Enviada por:</b> {usuario}</p>
-      <p>Ingresa a ALEMSI con tu usuario de Coordinación para revisar y <b>Autorizar</b> u <b>Observar</b>.</p>
-    </div>
-    """
-    _notificar_flujo_coordinacion('coordinacion', asunto, html, 'minuta_flujo_coordinacion', f'{fecha_desde}..{fecha_hasta}', usuario, f'Envío a Coordinación v{version}')
+    if correo_id:
+        with conn.session as ses_mail:
+            procesar_correo(ses_mail,correo_id,enviar_email)
+            ses_mail.commit()
     return version
 
 
@@ -2930,6 +2871,10 @@ def _render_estado_coordinacion_admin(ini, fin):
         st.info("Este período todavía no ha sido enviado a Coordinación.")
     else:
         r = actual.iloc[0]
+        if str(r.get("estado") or "").upper()=="OBSERVADA":
+            st.error("📥 Minuta observada por Coordinador")
+        elif str(r.get("estado") or "").upper()=="AUTORIZADA":
+            st.success("📥 Minuta autorizada por Coordinador")
         st.markdown(
             f"**Estado:** {_estado_flujo_label(r.get('estado'))} · "
             f"**Versión:** {int(r.get('version') or 1)}"
@@ -2947,6 +2892,20 @@ def _render_estado_coordinacion_admin(ini, fin):
             meta.append(f"Revisión: {str(r.get('coordinacion_at'))[:16].replace('T',' ')}")
         if meta:
             st.caption(" · ".join(meta))
+        detalle_revision = conn.query(
+            """SELECT fecha,servicio,tipo_opcion,plato_actual,observacion,usuario,fecha_accion,accion
+               FROM minuta_revision_coordinacion
+               WHERE flujo_id=:flujo AND estado='VIGENTE'
+               ORDER BY fecha,servicio,tipo_opcion""",
+            params={"flujo":int(r.get("id"))}, ttl=0,
+        )
+        observadas = detalle_revision[detalle_revision["accion"].astype(str)=="OBSERVADO"] if not detalle_revision.empty else detalle_revision
+        if observadas is not None and not observadas.empty:
+            st.dataframe(observadas.rename(columns={
+                "fecha":"Fecha","servicio":"Servicio","tipo_opcion":"Opción",
+                "plato_actual":"Plato","observacion":"Comentario","usuario":"Coordinador",
+                "fecha_accion":"Fecha/hora","accion":"Resultado",
+            }),use_container_width=True,hide_index=True)
 
     hist = conn.query(
         """
@@ -3039,95 +2998,92 @@ def render_coordinacion():
             if df.empty:
                 st.error("La propuesta no contiene minutas activas en este período.")
             else:
-                for fecha_d in sorted(df["fecha"].astype(str).unique().tolist()):
-                    d = df[df["fecha"].astype(str)==fecha_d].copy()
-                    st.markdown(f"##### {fecha_visible(fecha_d)}")
-                    st.dataframe(
-                        d[["servicio","tipo_opcion","plato"]].rename(columns={
-                            "servicio":"Servicio","tipo_opcion":"Opción","plato":"Plato"
-                        }),
-                        use_container_width=True, hide_index=True
-                    )
-
-                alertas = _alertas_preventivas_minuta(df)
-                if alertas:
-                    st.warning("La revisión preventiva detectó aspectos que conviene verificar:")
-                    for alerta in alertas:
-                        st.caption(f"• {alerta}")
-
-                decision = st.radio(
-                    "Decisión de Coordinación",
-                    ["AUTORIZAR","OBSERVAR"],
-                    horizontal=True,
-                    key=f"coord_decision_{flujo_id}"
+                fechas_coord = sorted(df["fecha"].astype(str).unique().tolist())
+                _render_minuta_semanal(
+                    df, fechas_visibles=[date.fromisoformat(f) for f in fechas_coord],
+                    titulo_personalizado=f"Minuta en revisión · {fecha_visible(ini)} → {fecha_visible(fin)}",
                 )
-                observacion = st.text_area(
-                    "Observación para Administración Casino",
-                    key=f"coord_observacion_{flujo_id}",
-                    placeholder="Obligatoria si observas la minuta. Indica claramente qué debe revisar Administración Casino."
+                st.markdown("### Revisión del día seleccionado")
+                fecha_d = st.selectbox(
+                    "Día", fechas_coord, format_func=fecha_visible,
+                    key=f"coord_dia_{flujo_id}",
                 )
-                clave_conf_coord=f"coord_confirmar_{flujo_id}"
-                st.checkbox(
-                    "Confirmo que revisé la propuesta completa del período",
-                    key=clave_conf_coord,
-                    help="La minuta no se autoriza ni observa si esta casilla no está marcada."
-                )
-                st.caption("La decisión queda registrada con usuario, fecha, versión y trazabilidad.")
-
-                if st.button(
-                    "✅ AUTORIZAR MINUTA" if decision=="AUTORIZAR" else "🟠 ENVIAR OBSERVACIÓN",
-                    type="primary", use_container_width=True,
-                    key=f"coord_guardar_decision_{flujo_id}"
-                ):
-                    if not bool(st.session_state.get(clave_conf_coord, False)):
-                        st.warning("Confirma que revisaste la propuesta completa antes de guardar la decisión.")
-                    elif decision=="OBSERVAR" and not observacion.strip():
-                        st.error("Debes indicar la observación antes de devolver la minuta.")
-                    else:
-                        nuevo_estado = "AUTORIZADA" if decision=="AUTORIZAR" else "OBSERVADA"
-                        ahora = datetime.now().isoformat()
-                        with conn.session as ses:
-                            execute_sql(
-                                ses,
-                                """
-                                UPDATE minuta_flujo_coordinacion
-                                SET estado=%s,observacion=%s,coordinador=%s,coordinacion_at=%s
-                                WHERE id=%s
-                                """,
-                                (nuevo_estado, observacion.strip(),
-                                 str(usuario.get("username")), ahora, int(flujo_id))
+                revisiones = conn.query("""
+                    SELECT fecha,servicio,tipo_opcion,accion,observacion
+                    FROM minuta_revision_coordinacion
+                    WHERE flujo_id=:flujo AND estado='VIGENTE'
+                """, params={"flujo":int(flujo_id)}, ttl=0)
+                guardadas = {
+                    (str(r["fecha"]),str(r["servicio"]),str(r["tipo_opcion"])):r
+                    for _,r in revisiones.iterrows()
+                }
+                dia = df[df["fecha"].astype(str)==fecha_d].copy()
+                operativa = dia[dia["servicio"].isin(["Almuerzo","Cena"])]
+                if operativa.empty:
+                    operativa = dia
+                indicadores=[]
+                for servicio, grupo in operativa.groupby("servicio", sort=False):
+                    st.markdown(f"#### {str(servicio).upper()}")
+                    for _, item in grupo.iterrows():
+                        opcion, plato = str(item["tipo_opcion"]), str(item["plato"])
+                        clave=(fecha_d,str(servicio),opcion)
+                        previa=guardadas.get(clave)
+                        anterior=str(previa.get("accion")) if previa is not None else "PENDIENTE"
+                        indicadores.append(anterior)
+                        st.markdown(f"**{opcion} — {plato}**")
+                        opciones=["Conforme","Observar"]
+                        indice=1 if anterior=="OBSERVADO" else 0
+                        decision_item=st.radio(
+                            "Resultado",opciones,index=indice,horizontal=True,
+                            key=f"coord_item_{flujo_id}_{fecha_d}_{servicio}_{opcion}",
+                            label_visibility="collapsed",
+                        )
+                        comentario_item=""
+                        if decision_item=="Observar":
+                            comentario_item=st.text_area(
+                                "Comentario de la observación",
+                                value=str(previa.get("observacion") or "") if previa is not None else "",
+                                key=f"coord_com_{flujo_id}_{fecha_d}_{servicio}_{opcion}",
                             )
-                            ses.commit()
-                        registrar_auditoria(
-                            usuario.get("username"),
-                            "DECISION_COORDINACION_MINUTA",
-                            "minuta_flujo_coordinacion",
-                            f"{ini}..{fin}",
-                            "EN_REVISION",
-                            nuevo_estado,
-                            observacion.strip()
-                        )
-                        asunto = (
-                            f"[ALEMSI] Minuta autorizada por Coordinación · v{int(flujo['version'])}"
-                            if nuevo_estado=="AUTORIZADA" else
-                            f"[ALEMSI] Minuta observada por Coordinación · v{int(flujo['version'])}"
-                        )
-                        html = f"""
-                        <div style='font-family:Arial,sans-serif;max-width:680px;margin:auto;border:1px solid #d7e2dc;border-radius:14px;padding:22px'>
-                          <h2 style='color:#0A2F6B'>Resultado de revisión de minuta</h2>
-                          <p><b>Período:</b> {fecha_visible(ini)} → {fecha_visible(fin)}<br>
-                             <b>Versión:</b> {int(flujo['version'])}<br>
-                             <b>Resultado:</b> {nuevo_estado}</p>
-                          <p><b>Observación:</b> {observacion.strip() or 'Sin observaciones'}</p>
-                          <p>{'La minuta ya puede ser publicada por Administración Casino.' if nuevo_estado=='AUTORIZADA' else 'Administración Casino debe corregir la minuta y reenviarla a Coordinación.'}</p>
-                        </div>
-                        """
-                        _notificar_flujo_coordinacion('admin_casino', asunto, html, 'minuta_flujo_coordinacion', flujo_id, usuario.get('username'), f'Decisión {nuevo_estado} v{int(flujo["version"])}')
-                        if nuevo_estado=="AUTORIZADA":
-                            st.success("Minuta autorizada. Administración Casino ya puede publicarla.")
-                        else:
-                            st.warning("Minuta observada y devuelta a Administración Casino para corrección.")
-                        st.rerun()
+                        if st.button("Guardar opción",key=f"coord_save_{flujo_id}_{fecha_d}_{servicio}_{opcion}"):
+                            try:
+                                with conn.session as ses:
+                                    guardar_revision_item(ses,flujo_id=int(flujo_id),fecha=fecha_d,
+                                        servicio=str(servicio),opcion=opcion,plato=plato,
+                                        decision="OBSERVADO" if decision_item=="Observar" else "CONFORME",
+                                        comentario=comentario_item,usuario=usuario.get("username"))
+                                    ses.commit()
+                                st.success("Avance guardado."); st.rerun()
+                            except ValueError as exc:
+                                st.error(str(exc))
+                estado_dia = "⚠ Observado" if "OBSERVADO" in indicadores else ("✓ Conforme" if indicadores and all(x=="CONFORME" for x in indicadores) else "○ Pendiente")
+                st.caption(f"Estado del día: {estado_dia}")
+                if st.button("✓ Todo el día conforme",use_container_width=True,key=f"coord_all_{flujo_id}_{fecha_d}"):
+                    with conn.session as ses:
+                        for _,item in operativa.iterrows():
+                            guardar_revision_item(ses,flujo_id=int(flujo_id),fecha=fecha_d,
+                                servicio=str(item["servicio"]),opcion=str(item["tipo_opcion"]),
+                                plato=str(item["plato"]),decision="CONFORME",comentario="",
+                                usuario=usuario.get("username"))
+                        ses.commit()
+                    st.success("Día guardado como conforme."); st.rerun()
+
+                total_items=len(df[df["servicio"].isin(["Almuerzo","Cena"])]) or len(df)
+                st.progress(min(len(revisiones)/max(total_items,1),1.0),text=f"{len(revisiones)} de {total_items} opciones revisadas")
+                if st.button("Finalizar revisión del período",type="primary",use_container_width=True,
+                             disabled=len(revisiones)<total_items,key=f"coord_finish_{flujo_id}"):
+                    admin_emails=_correos_rol_y_config('admin_casino','AdminCasino')
+                    with conn.session as ses:
+                        nuevo_estado,correo_id=finalizar_revision(ses,flujo_id=int(flujo_id),
+                            usuario=usuario.get("username"),admin_email=admin_emails[0] if admin_emails else "")
+                        ses.commit()
+                    if correo_id:
+                        with conn.session as ses_mail:
+                            procesar_correo(ses_mail,correo_id,enviar_email); ses_mail.commit()
+                    registrar_auditoria(usuario.get("username"),"DECISION_COORDINACION_MINUTA",
+                        "minuta_flujo_coordinacion",str(flujo_id),"EN_REVISION",nuevo_estado,
+                        "Revisión por fecha/servicio/opción")
+                    st.success(f"Revisión finalizada: {nuevo_estado}."); st.rerun()
 
     st.divider()
     st.markdown("#### Historial de revisiones")
@@ -4118,7 +4074,7 @@ def render_casino():
                         html_notif = f"""
                         <div style='font-family:Arial,sans-serif;max-width:680px;padding:22px;border:1px solid #d8e6e2;border-radius:12px'>
                           <h2 style='color:#0A2F6B'>{titulo_notif}</h2>
-                          <p><b>Referencia:</b> {ref_val}</p>
+                          <p><b>Código de reserva:</b> {ref_val}</p>
                           {detalle_notif}
                           {boton_notif}
                           <p>La reserva original y su referencia se mantienen sin cambios.</p>
@@ -4517,7 +4473,7 @@ def render_admin():
             # 4. Control General de Reservas
             st.markdown("#### 4️⃣ Control general de reservas")
             df_control = conn.query("SELECT s.id, s.referencia_reserva, s.fecha, s.rut, c.nombre, c.institucion, s.plato_reservado, s.metodo_pago, s.estado_pago, s.estado_consumo, s.precio_aplicado, s.codigo FROM solicitudes s LEFT JOIN comensales c ON s.rut=c.rut ORDER BY s.fecha DESC LIMIT 500", ttl=0)
-            st.dataframe(_tabla_visible(df_control,{"referencia_reserva":"Referencia","fecha":"Fecha","rut":"RUT","nombre":"Nombre","institucion":"Institución","plato_reservado":"Plato","metodo_pago":"Modalidad de pago","estado_pago":"Estado de pago","estado_consumo":"Estado de consumo","precio_aplicado":"Monto","codigo":"Código"},["fecha"]),use_container_width=True,hide_index=True)
+            st.dataframe(_tabla_visible(df_control,{"referencia_reserva":"Código de reserva","fecha":"Fecha","rut":"RUT","nombre":"Nombre","institucion":"Institución","plato_reservado":"Plato","metodo_pago":"Modalidad de pago","estado_pago":"Estado de pago","estado_consumo":"Estado de consumo","precio_aplicado":"Monto","codigo":"Código"},["fecha"]),use_container_width=True,hide_index=True)
             st.metric("Total reservas históricas", len(df_control))
             pdf_control=generar_pdf_tabla_alemsi(
                 "Control operativo de reservas",
@@ -5424,6 +5380,19 @@ def render_admin():
         if modulo_admin == "⚖️ Excepciones":
             conn=get_conn()
             st.markdown("#### ⏱️ Excepción de reserva")
+            with st.expander("⚙️ Parámetros operativos de reserva y cancelación",expanded=False):
+                cfg_op=conn.query("SELECT clave,valor,descripcion FROM configuracion_operativa ORDER BY clave",ttl=30)
+                valores={str(r["clave"]):int(r["valor"]) for _,r in cfg_op.iterrows()}
+                p1,p2,p3=st.columns(3)
+                with p1: ant_res=st.number_input("Anticipación reserva (horas)",min_value=0,value=valores.get('reserva_anticipacion_horas',48))
+                with p2: ant_can=st.number_input("Anticipación cancelación (horas)",min_value=0,value=valores.get('cancelacion_anticipacion_horas',48))
+                with p3: max_con=st.number_input("Máximo días consecutivos",min_value=1,value=valores.get('reserva_max_dias_consecutivos',7))
+                if st.button("Guardar parámetros operativos",key="guardar_cfg_operativa"):
+                    with conn.session as ses_cfg:
+                        for clave,valor in [('reserva_anticipacion_horas',ant_res),('cancelacion_anticipacion_horas',ant_can),('reserva_max_dias_consecutivos',max_con)]:
+                            execute_sql(ses_cfg,"UPDATE configuracion_operativa SET valor=%s,actualizado_por=%s,actualizado_at=%s WHERE clave=%s",(int(valor),st.session_state.usuario.get('username'),datetime.now().isoformat(),clave))
+                        ses_cfg.commit()
+                    st.success("Parámetros actualizados."); st.rerun()
             st.caption("Abre temporalmente la ventana de reserva normal. No crea raciones, no valida pagos y no genera una estructura paralela.")
             rut_exc_raw=st.text_input("RUT del comensal",placeholder="Ej.: 12.345.678-5",key="exc_res_rut")
             rut_exc=normalizar_rut(rut_exc_raw) if rut_exc_raw.strip() else ""
@@ -5455,6 +5424,25 @@ def render_admin():
                     registrar_auditoria(usuario_exc,"AUTORIZAR_EXCEPCION_RESERVA","excepciones_reserva",rut_exc,"",f"{exc_desde.isoformat()} → {exc_hasta.isoformat()}",exc_motivo.strip())
                     st.success("Excepción autorizada. El comensal debe ingresar a su reserva normal y elegir sus servicios/platos.")
                     st.rerun()
+            pendientes_cancel=conn.query("SELECT id,referencia_reserva,rut,fecha,servicio,motivo,solicitado_at FROM solicitudes_excepcion_cancelacion WHERE estado='PENDIENTE' ORDER BY id",ttl=0)
+            if not pendientes_cancel.empty:
+                st.markdown("##### Solicitudes de excepción de cancelación")
+                st.dataframe(pendientes_cancel,use_container_width=True,hide_index=True)
+                solicitud_sel=selector_neutro("Solicitud a resolver",pendientes_cancel["id"].astype(int).tolist(),key="exc_cancel_sel")
+                decision_exc=st.radio("Resolución",["Aprobar","Rechazar"],horizontal=True,key="exc_cancel_decision")
+                detalle_res=st.text_area("Fundamento de la resolución",key="exc_cancel_resolucion")
+                if solicitud_sel is not None and st.button("Guardar resolución",key="exc_cancel_resolver",type="primary"):
+                    correos_fin=_correos_rol_y_config('finanzas','Finanzas')
+                    with conn.session as ses:
+                        estado_res=resolver_excepcion_cancelacion(ses,solicitud_id=int(solicitud_sel),
+                            aprobar=decision_exc=="Aprobar",resolucion=detalle_res,
+                            usuario=st.session_state.usuario.get("username"),
+                            finanzas_email=correos_fin[0] if correos_fin else "")
+                        ses.commit()
+                    registrar_auditoria(st.session_state.usuario.get("username"),"RESOLVER_EXCEPCION_CANCELACION",
+                        "solicitudes_excepcion_cancelacion",str(solicitud_sel),"PENDIENTE",estado_res,detalle_res)
+                    st.success(f"Solicitud {estado_res.lower()} con trazabilidad."); st.rerun()
+
             hist_exc=conn.query("SELECT id,rut,fecha_desde,fecha_hasta,motivo,autorizado_por,autorizado_at,activa FROM excepciones_reserva ORDER BY id DESC LIMIT 200",ttl=0)
             if not hist_exc.empty:
                 st.markdown("##### Historial de excepciones")
